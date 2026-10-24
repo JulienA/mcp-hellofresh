@@ -2,27 +2,87 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.HelloFreshBrowser = void 0;
 const playwright_1 = require("playwright");
+const auth_js_1 = require("./auth.js");
 class HelloFreshBrowser {
     browser = null;
     context = null;
     page = null;
     isLoggedIn = false;
     baseUrl = "https://www.hellofresh.com";
+    mutex = new auth_js_1.AsyncMutex();
+    launchFn;
+    constructor(options = {}) {
+        this.launchFn =
+            options.launch ??
+                (() => playwright_1.chromium.launch({
+                    headless: true,
+                    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+                }));
+    }
+    /** True when a Playwright browser is currently open (tests / diagnostics). */
+    hasActiveBrowser() {
+        return this.browser !== null;
+    }
+    isSessionFlagSet() {
+        return this.isLoggedIn;
+    }
+    /**
+     * Opens Chromium. Safe to call repeatedly: any existing browser is closed first.
+     */
     async init() {
-        this.browser = await playwright_1.chromium.launch({
-            headless: true,
-            args: ["--no-sandbox", "--disable-setuid-sandbox"],
+        await this.mutex.runExclusive(() => this.initUnlocked());
+    }
+    /**
+     * Session entry point: optional password fallback only.
+     * Google SSO credentials must never be passed here — interactive login is a later step.
+     */
+    async ensureReady(credentials) {
+        await this.mutex.runExclusive(async () => {
+            if (this.isLoggedIn) {
+                return;
+            }
+            if (!credentials) {
+                throw auth_js_1.AuthError.missingSession();
+            }
+            try {
+                await this.initUnlocked();
+                await this.loginUnlocked(credentials);
+            }
+            catch (error) {
+                await this.closeUnlocked();
+                throw (0, auth_js_1.toAuthError)(error);
+            }
         });
+    }
+    async login(credentials) {
+        await this.mutex.runExclusive(async () => {
+            try {
+                if (!this.page) {
+                    await this.initUnlocked();
+                }
+                await this.loginUnlocked(credentials);
+            }
+            catch (error) {
+                await this.closeUnlocked();
+                throw (0, auth_js_1.toAuthError)(error);
+            }
+        });
+    }
+    async initUnlocked() {
+        await this.closeUnlocked();
+        this.browser = await this.launchFn();
         this.context = await this.browser.newContext({
             userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             viewport: { width: 1280, height: 720 },
         });
         this.page = await this.context.newPage();
     }
-    async login(credentials) {
-        if (!this.page)
-            await this.init();
+    async loginUnlocked(credentials) {
+        this.isLoggedIn = false;
         const page = this.page;
+        if (!page) {
+            throw auth_js_1.AuthError.loginFailed("Browser page is not initialized");
+        }
         await page.goto(`${this.baseUrl}/login`);
         await page.waitForLoadState("networkidle");
         // Handle cookie consent if present
@@ -35,7 +95,7 @@ class HelloFreshBrowser {
         catch {
             // Cookie banner not present
         }
-        // Fill login form
+        // Optional password-account fallback. Never used for Google SSO.
         const emailInput = page.locator('input[type="email"], input[name="email"], input[id="email"]');
         await emailInput.fill(credentials.email);
         const passwordInput = page.locator('input[type="password"], input[name="password"], input[id="password"]');
@@ -43,7 +103,6 @@ class HelloFreshBrowser {
         const submitBtn = page.locator('button[type="submit"], button:has-text("Log In"), button:has-text("Sign In")');
         await submitBtn.first().click();
         await page.waitForLoadState("networkidle");
-        // Check if login succeeded
         const currentUrl = page.url();
         if (currentUrl.includes("/login") &&
             !currentUrl.includes("/login/success")) {
@@ -51,13 +110,13 @@ class HelloFreshBrowser {
                 .locator('[data-testid="error-message"], .error-message, [role="alert"]')
                 .textContent()
                 .catch(() => "Unknown error");
-            throw new Error(`Login failed: ${errorMsg}`);
+            throw auth_js_1.AuthError.invalidCredentials(errorMsg ?? undefined);
         }
         this.isLoggedIn = true;
     }
     async ensureLoggedIn() {
         if (!this.isLoggedIn) {
-            throw new Error("Not logged in. Please provide HELLOFRESH_EMAIL and HELLOFRESH_PASSWORD environment variables.");
+            throw auth_js_1.AuthError.missingSession(auth_js_1.MISSING_SESSION_MESSAGE);
         }
     }
     async getMenu(weekOffset = 0) {
@@ -550,6 +609,9 @@ class HelloFreshBrowser {
         };
     }
     async close() {
+        await this.mutex.runExclusive(() => this.closeUnlocked());
+    }
+    async closeUnlocked() {
         if (this.page) {
             await this.page.close().catch(() => { });
             this.page = null;

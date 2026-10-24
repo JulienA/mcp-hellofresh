@@ -8,7 +8,11 @@ import {
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { HelloFreshBrowser, HelloFreshCredentials } from "./browser.js";
+import {
+  formatAuthToolError,
+  readOptionalPasswordCredentials,
+} from "./auth.js";
+import { HelloFreshBrowser } from "./browser.js";
 
 // ─── Schemas ──────────────────────────────────────────────────────────────────
 
@@ -369,7 +373,6 @@ const TOOLS: Tool[] = [
 class HelloFreshMCPServer {
   private server: Server;
   private hellofresh: HelloFreshBrowser;
-  private initialized = false;
 
   constructor() {
     this.server = new Server(
@@ -381,21 +384,7 @@ class HelloFreshMCPServer {
   }
 
   private async ensureInitialized(): Promise<void> {
-    if (!this.initialized) {
-      const email = process.env.HELLOFRESH_EMAIL;
-      const password = process.env.HELLOFRESH_PASSWORD;
-
-      if (!email || !password) {
-        throw new Error(
-          "HELLOFRESH_EMAIL and HELLOFRESH_PASSWORD environment variables are required."
-        );
-      }
-
-      const credentials: HelloFreshCredentials = { email, password };
-      await this.hellofresh.init();
-      await this.hellofresh.login(credentials);
-      this.initialized = true;
-    }
+    await this.hellofresh.ensureReady(readOptionalPasswordCredentials());
   }
 
   private setupHandlers(): void {
@@ -410,11 +399,7 @@ class HelloFreshMCPServer {
         await this.ensureInitialized();
         return await this.handleTool(name, args ?? {});
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return {
-          content: [{ type: "text", text: `Error: ${message}` }],
-          isError: true,
-        };
+        return formatAuthToolError(error);
       }
     });
   }

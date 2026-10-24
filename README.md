@@ -34,7 +34,9 @@ npx playwright install chromium
 
 ## Configuration
 
-Set your HelloFresh credentials as environment variables:
+Authentication is **session-based**. Google SSO users cannot sign in via `HELLOFRESH_EMAIL` / `HELLOFRESH_PASSWORD` — do not put Google credentials in env or in the MCP config. Interactive Google SSO + persisted Playwright `storageState` is the planned primary path (not fully wired yet). Until then, tools return a structured `missing_session` error: *Session expired, run login again*.
+
+Optional fallback for HelloFresh **password** accounts only:
 
 ```bash
 export HELLOFRESH_EMAIL="your@email.com"
@@ -50,15 +52,13 @@ Add to your `claude_desktop_config.json`:
   "mcpServers": {
     "hellofresh": {
       "command": "npx",
-      "args": ["-y", "@striderlabs/mcp-hellofresh"],
-      "env": {
-        "HELLOFRESH_EMAIL": "your@email.com",
-        "HELLOFRESH_PASSWORD": "yourpassword"
-      }
+      "args": ["-y", "@striderlabs/mcp-hellofresh"]
     }
   }
 }
 ```
+
+Google SSO users should omit `env` entirely. Password-account users may add optional `HELLOFRESH_EMAIL` / `HELLOFRESH_PASSWORD` (HelloFresh password, never a Google password).
 
 Config file locations:
 - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
@@ -161,9 +161,10 @@ This connector uses [Playwright](https://playwright.dev) browser automation to i
 
 ## Security
 
-- Credentials are passed via environment variables only — never hardcoded
-- The browser runs in headless mode with no persistent storage
-- Sessions are not saved between server restarts
+- Never store or automate Google credentials. Google SSO must be completed by the user in an interactive browser (later step).
+- HelloFresh email/password env vars are an optional fallback for non-SSO accounts only — never hardcoded
+- The browser currently runs in headless mode with no persistent storage (session persistence is a later step)
+- Sessions are not saved between server restarts yet
 
 ## License
 

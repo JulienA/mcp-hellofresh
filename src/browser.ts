@@ -1,8 +1,19 @@
 import { Browser, BrowserContext, Page, chromium } from "playwright";
+import {
+  AsyncMutex,
+  AuthError,
+  MISSING_SESSION_MESSAGE,
+  toAuthError,
+} from "./auth.js";
 
 export interface HelloFreshCredentials {
   email: string;
   password: string;
+}
+
+export interface HelloFreshBrowserOptions {
+  /** Injected in tests. Production launches headed-capable Chromium via Playwright. */
+  launch?: () => Promise<Browser>;
 }
 
 export interface Recipe {
@@ -94,12 +105,74 @@ export class HelloFreshBrowser {
   private page: Page | null = null;
   private isLoggedIn = false;
   private readonly baseUrl = "https://www.hellofresh.com";
+  private readonly mutex = new AsyncMutex();
+  private readonly launchFn: () => Promise<Browser>;
 
+  constructor(options: HelloFreshBrowserOptions = {}) {
+    this.launchFn =
+      options.launch ??
+      (() =>
+        chromium.launch({
+          headless: true,
+          args: ["--no-sandbox", "--disable-setuid-sandbox"],
+        }));
+  }
+
+  /** True when a Playwright browser is currently open (tests / diagnostics). */
+  hasActiveBrowser(): boolean {
+    return this.browser !== null;
+  }
+
+  isSessionFlagSet(): boolean {
+    return this.isLoggedIn;
+  }
+
+  /**
+   * Opens Chromium. Safe to call repeatedly: any existing browser is closed first.
+   */
   async init(): Promise<void> {
-    this.browser = await chromium.launch({
-      headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    await this.mutex.runExclusive(() => this.initUnlocked());
+  }
+
+  /**
+   * Session entry point: optional password fallback only.
+   * Google SSO credentials must never be passed here — interactive login is a later step.
+   */
+  async ensureReady(credentials?: HelloFreshCredentials): Promise<void> {
+    await this.mutex.runExclusive(async () => {
+      if (this.isLoggedIn) {
+        return;
+      }
+      if (!credentials) {
+        throw AuthError.missingSession();
+      }
+      try {
+        await this.initUnlocked();
+        await this.loginUnlocked(credentials);
+      } catch (error) {
+        await this.closeUnlocked();
+        throw toAuthError(error);
+      }
     });
+  }
+
+  async login(credentials: HelloFreshCredentials): Promise<void> {
+    await this.mutex.runExclusive(async () => {
+      try {
+        if (!this.page) {
+          await this.initUnlocked();
+        }
+        await this.loginUnlocked(credentials);
+      } catch (error) {
+        await this.closeUnlocked();
+        throw toAuthError(error);
+      }
+    });
+  }
+
+  private async initUnlocked(): Promise<void> {
+    await this.closeUnlocked();
+    this.browser = await this.launchFn();
     this.context = await this.browser.newContext({
       userAgent:
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -108,9 +181,12 @@ export class HelloFreshBrowser {
     this.page = await this.context.newPage();
   }
 
-  async login(credentials: HelloFreshCredentials): Promise<void> {
-    if (!this.page) await this.init();
-    const page = this.page!;
+  private async loginUnlocked(credentials: HelloFreshCredentials): Promise<void> {
+    this.isLoggedIn = false;
+    const page = this.page;
+    if (!page) {
+      throw AuthError.loginFailed("Browser page is not initialized");
+    }
 
     await page.goto(`${this.baseUrl}/login`);
     await page.waitForLoadState("networkidle");
@@ -127,7 +203,7 @@ export class HelloFreshBrowser {
       // Cookie banner not present
     }
 
-    // Fill login form
+    // Optional password-account fallback. Never used for Google SSO.
     const emailInput = page.locator(
       'input[type="email"], input[name="email"], input[id="email"]'
     );
@@ -145,7 +221,6 @@ export class HelloFreshBrowser {
 
     await page.waitForLoadState("networkidle");
 
-    // Check if login succeeded
     const currentUrl = page.url();
     if (
       currentUrl.includes("/login") &&
@@ -155,7 +230,7 @@ export class HelloFreshBrowser {
         .locator('[data-testid="error-message"], .error-message, [role="alert"]')
         .textContent()
         .catch(() => "Unknown error");
-      throw new Error(`Login failed: ${errorMsg}`);
+      throw AuthError.invalidCredentials(errorMsg ?? undefined);
     }
 
     this.isLoggedIn = true;
@@ -163,9 +238,7 @@ export class HelloFreshBrowser {
 
   private async ensureLoggedIn(): Promise<void> {
     if (!this.isLoggedIn) {
-      throw new Error(
-        "Not logged in. Please provide HELLOFRESH_EMAIL and HELLOFRESH_PASSWORD environment variables."
-      );
+      throw AuthError.missingSession(MISSING_SESSION_MESSAGE);
     }
   }
 
@@ -886,6 +959,10 @@ export class HelloFreshBrowser {
   }
 
   async close(): Promise<void> {
+    await this.mutex.runExclusive(() => this.closeUnlocked());
+  }
+
+  private async closeUnlocked(): Promise<void> {
     if (this.page) {
       await this.page.close().catch(() => {});
       this.page = null;

@@ -5,6 +5,7 @@ const index_js_1 = require("@modelcontextprotocol/sdk/server/index.js");
 const stdio_js_1 = require("@modelcontextprotocol/sdk/server/stdio.js");
 const types_js_1 = require("@modelcontextprotocol/sdk/types.js");
 const zod_1 = require("zod");
+const auth_js_1 = require("./auth.js");
 const browser_js_1 = require("./browser.js");
 // ─── Schemas ──────────────────────────────────────────────────────────────────
 const GetMenuSchema = zod_1.z.object({
@@ -337,24 +338,13 @@ const TOOLS = [
 class HelloFreshMCPServer {
     server;
     hellofresh;
-    initialized = false;
     constructor() {
         this.server = new index_js_1.Server({ name: "@striderlabs/mcp-hellofresh", version: "1.0.0" }, { capabilities: { tools: {} } });
         this.hellofresh = new browser_js_1.HelloFreshBrowser();
         this.setupHandlers();
     }
     async ensureInitialized() {
-        if (!this.initialized) {
-            const email = process.env.HELLOFRESH_EMAIL;
-            const password = process.env.HELLOFRESH_PASSWORD;
-            if (!email || !password) {
-                throw new Error("HELLOFRESH_EMAIL and HELLOFRESH_PASSWORD environment variables are required.");
-            }
-            const credentials = { email, password };
-            await this.hellofresh.init();
-            await this.hellofresh.login(credentials);
-            this.initialized = true;
-        }
+        await this.hellofresh.ensureReady((0, auth_js_1.readOptionalPasswordCredentials)());
     }
     setupHandlers() {
         this.server.setRequestHandler(types_js_1.ListToolsRequestSchema, async () => ({
@@ -367,11 +357,7 @@ class HelloFreshMCPServer {
                 return await this.handleTool(name, args ?? {});
             }
             catch (error) {
-                const message = error instanceof Error ? error.message : String(error);
-                return {
-                    content: [{ type: "text", text: `Error: ${message}` }],
-                    isError: true,
-                };
+                return (0, auth_js_1.formatAuthToolError)(error);
             }
         });
     }
