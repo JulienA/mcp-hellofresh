@@ -3,7 +3,7 @@ import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, it, mock } from "node:test";
-import { AccountStore, readStoredAccount, userIdFor, type StoredAccount } from "./accounts.js";
+import { AccountStore, readStoredAccount, userIdFor, writeStoredAccount, type StoredAccount } from "./accounts.js";
 import { createAccountLinker } from "./account-linker.js";
 import {
   HelloFreshApi,
@@ -26,6 +26,7 @@ interface Call {
   url: string;
   method: string;
   authorization: string;
+  contentType: string;
   body: string;
   origin: string;
 }
@@ -57,6 +58,7 @@ function recorded(handler: (call: Call) => Response): { fetchImpl: FetchLike; ca
       url: String(input),
       method: init?.method ?? "GET",
       authorization: headerValue(init?.headers, "Authorization"),
+      contentType: headerValue(init?.headers, "Content-Type"),
       body: typeof init?.body === "string" ? init.body : "",
       origin: headerValue(init?.headers, "Origin"),
     };
@@ -149,6 +151,7 @@ describe("HelloFreshApi.login", () => {
     const { fetchImpl, calls } = recorded((call) => {
       if (call.url.includes("/gw/login")) {
         assert.equal(call.origin, "https://www.hellofresh.fr");
+        assert.equal(call.contentType, "application/json");
         assert.match(call.url, /country=FR/);
         assert.match(call.url, /locale=fr-FR/);
         const body = JSON.parse(call.body) as { username: string; password: string };
@@ -311,6 +314,10 @@ describe("HelloFreshApi requests", () => {
     const { fetchImpl, calls } = recorded((call) => {
       if (call.url.includes("/gw/refresh")) {
         assert.equal(JSON.parse(call.body).refresh_token, "old-refresh");
+        assert.equal(call.authorization, "");
+        assert.equal(call.contentType, "text/plain;charset=UTF-8");
+        assert.match(call.url, /country=FR/);
+        assert.match(call.url, /locale=fr-FR/);
         return Response.json({
           access_token: "new-access",
           refresh_token: "new-refresh",
@@ -334,7 +341,8 @@ describe("HelloFreshApi requests", () => {
     assert.equal(menu.recipes[0]?.label, undefined);
     assert.deepEqual(menu.recipes[0]?.tags, []);
     assert.equal(updates.at(-1)?.accessToken, "new-access");
-    assert.ok(calls.some((call) => call.url.includes("/gw/refresh")));
+    assert.equal(calls.filter((call) => call.url.includes("/gw/refresh")).length, 1);
+    assert.ok(calls.some((call) => call.url.includes("/subscriptions") && call.authorization === "Bearer new-access"));
   });
 
   it("reads prep time and labels from the menu", async () => {
@@ -553,6 +561,33 @@ describe("HelloFreshApi requests", () => {
     assert.equal(await store.load(alice.userId), undefined);
     assert.ok(await store.load(bob.userId));
   });
+
+  it("asks to reconnect once when refresh returns 400 and reports that on status", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "hf-refresh-rejected-"));
+    const store = new AccountStore(dir);
+    const account = stored("old-access", Math.floor(Date.now() / 1000) - 100, 30);
+    await store.save(account);
+    const { fetchImpl, calls } = recorded((call) => {
+      if (call.url.includes("/gw/refresh")) {
+        return Response.json({ message: "expired" }, { status: 400 });
+      }
+      return okAccount(call) ?? Response.json({}, { status: 404 });
+    });
+    const session = new AccountClients(store, fetchImpl).sessionFor(account.userId);
+    const rejectRefresh = (error: unknown): boolean => {
+      assert.ok(error instanceof HelloFreshApiError);
+      assert.equal(error.code, "reconnect_required");
+      return true;
+    };
+    await assert.rejects(() => session.api().then((api) => api.getSubscription()), rejectRefresh);
+    await assert.rejects(() => session.api().then((api) => api.getPastOrders(10)), rejectRefresh);
+    assert.equal(calls.filter((call) => call.url.includes("/gw/refresh")).length, 1);
+    const status = await session.status();
+    assert.equal(status.authenticated, true);
+    assert.equal(status.reconnectRequired, true);
+    assert.equal(status.accessTokenValid, false);
+    assert.equal(status.email, account.email);
+  });
 });
 
 describe("stdio account", () => {
@@ -588,6 +623,31 @@ describe("stdio account", () => {
     assert.equal(calls.filter((call) => call.url.includes("/gw/login")).length, 1);
     await session.api();
     assert.equal(calls.filter((call) => call.url.includes("/gw/login")).length, 1);
+  });
+
+  it("reports reconnectRequired from the cached client after refresh is rejected", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "hf-stdio-refresh-"));
+    const path = join(dir, "account.json");
+    const account = stored("old-access", Math.floor(Date.now() / 1000) - 100, 30);
+    await writeStoredAccount(path, account);
+    const { fetchImpl, calls } = recorded((call) => {
+      if (call.url.includes("/gw/refresh")) {
+        return Response.json({ message: "expired" }, { status: 400 });
+      }
+      return okAccount(call) ?? Response.json({}, { status: 404 });
+    });
+    const session = createStdioSession({ HELLOFRESH_ACCOUNT_PATH: path, HELLOFRESH_COUNTRY: "fr" }, fetchImpl);
+    const rejectRefresh = (error: unknown): boolean => {
+      assert.ok(error instanceof HelloFreshApiError);
+      assert.equal(error.code, "reconnect_required");
+      return true;
+    };
+    await assert.rejects(() => session.api().then((api) => api.getSubscription()), rejectRefresh);
+    await assert.rejects(() => session.api().then((api) => api.getSubscription()), rejectRefresh);
+    assert.equal(calls.filter((call) => call.url.includes("/gw/refresh")).length, 1);
+    const status = await session.status();
+    assert.equal(status.reconnectRequired, true);
+    assert.equal(status.accessTokenValid, false);
   });
 });
 

@@ -166,6 +166,8 @@ export class HelloFreshApi {
   readonly country: HelloFreshCountry;
 
   private reloginTried = false;
+  /** Set when HelloFresh rejects the refresh token and password relogin cannot replace it. */
+  private refreshRejected = false;
 
   constructor(
     account: StoredAccount,
@@ -282,9 +284,9 @@ export class HelloFreshApi {
       authenticated: true,
       email: this.account.email,
       country: this.account.country,
-      accessTokenValid: !this.accessExpiring(0),
+      accessTokenValid: !this.refreshRejected && !this.accessExpiring(0),
       savedAt: this.account.savedAt,
-      reconnectRequired: false,
+      reconnectRequired: this.refreshRejected,
     };
   }
 
@@ -877,6 +879,9 @@ export class HelloFreshApi {
     extraHeaders?: Record<string, string>,
     retried = false
   ): Promise<unknown> {
+    if (this.refreshRejected) {
+      throw new HelloFreshApiError("reconnect_required", RECONNECT_MESSAGE);
+    }
     if (this.accessExpiring(60) && this.account.refreshToken) {
       await this.refresh();
     }
@@ -909,6 +914,9 @@ export class HelloFreshApi {
   }
 
   private async refresh(): Promise<void> {
+    if (this.refreshRejected) {
+      throw new HelloFreshApiError("reconnect_required", RECONNECT_MESSAGE);
+    }
     if (!this.account.refreshToken) {
       await this.tryRelogin();
       return;
@@ -920,8 +928,7 @@ export class HelloFreshApi {
         method: "POST",
         headers: {
           Accept: "*/*",
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${this.account.accessToken}`,
+          "Content-Type": "text/plain;charset=UTF-8",
           Origin: this.country.baseUrl,
           Referer: `${this.country.baseUrl}/login`,
           "User-Agent": USER_AGENT,
@@ -942,6 +949,7 @@ export class HelloFreshApi {
     }
     const now = Math.floor(Date.now() / 1000);
     const next = accountFromAuthPayload(payload, this.account.country, this.account.email, now);
+    this.refreshRejected = false;
     this.account = {
       ...this.account,
       accessToken: next.accessToken,
@@ -958,10 +966,19 @@ export class HelloFreshApi {
 
   private async tryRelogin(): Promise<void> {
     if (!this.hooks.relogin || this.reloginTried) {
+      this.refreshRejected = true;
       throw new HelloFreshApiError("reconnect_required", RECONNECT_MESSAGE);
     }
     this.reloginTried = true;
-    this.account = await this.hooks.relogin();
+    try {
+      this.account = await this.hooks.relogin();
+    } catch (error) {
+      if (!(error instanceof HelloFreshApiError) || (error.code !== "bot_blocked" && error.code !== "rate_limited")) {
+        this.refreshRejected = true;
+      }
+      throw error;
+    }
+    this.refreshRejected = false;
     await this.hooks.onUpdate?.(this.toStoredAccount());
   }
 }
