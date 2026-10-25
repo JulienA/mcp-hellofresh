@@ -25,6 +25,11 @@ export interface AccountStatus {
     savedAt: string | null;
     reconnectRequired: boolean;
 }
+export interface SelectedMeal {
+    recipeId: string;
+    recipeName: string;
+    servings: number;
+}
 export interface DeliveryWeek {
     weekId: string;
     deliveryDate?: string;
@@ -32,6 +37,7 @@ export interface DeliveryWeek {
     status?: string;
     subscriptionId?: string;
     sku?: string;
+    meals: SelectedMeal[];
 }
 export declare class HelloFreshApi {
     private readonly fetchImpl;
@@ -91,6 +97,7 @@ export declare class HelloFreshApi {
     private discoverEmail;
     private loadWeeks;
     private primarySubscription;
+    private selectedMealsForWeek;
     private recipesForWeek;
     private patchDeliveryStatus;
     private deliveryOptions;

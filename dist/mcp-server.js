@@ -480,7 +480,7 @@ class HelloFreshMCPServer {
                         weekId: week.weekId,
                         deliveryDate: week.deliveryDate ?? "",
                         status: week.status ?? "",
-                        meals: [],
+                        meals: week.meals,
                         canModify: (week.status ?? "").toUpperCase() !== "PAUSED",
                     })),
                 });
