@@ -3,6 +3,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdtemp, readFile, readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 import { readStoredAccount, userIdFor } from "./accounts.js";
 import { type HttpRuntimeConfig } from "./config.js";
@@ -277,7 +278,8 @@ async function startAuthorize(
   handle: HttpServerHandle,
   clientId: string,
   challenge: string,
-  method = "S256"
+  method = "S256",
+  cookie = ""
 ): Promise<Response> {
   const authorize = new URL("/oauth2/authorize", handle.baseUrl);
   authorize.searchParams.set("response_type", "code");
@@ -288,9 +290,13 @@ async function startAuthorize(
   authorize.searchParams.set("state", "xyz");
   authorize.searchParams.set("resource", handle.config.resourceUrl.href);
   authorize.searchParams.set("scope", "mcp offline_access");
+  const headers: Record<string, string> = { Accept: "text/html" };
+  if (cookie) {
+    headers.cookie = cookie;
+  }
   return fetch(authorize, {
     redirect: "manual",
-    headers: { Accept: "text/html" },
+    headers,
   });
 }
 
@@ -322,30 +328,71 @@ async function followToRedirect(
   cookie: string
 ): Promise<{ location: URL; cookie: string }> {
   let response = start;
+  let current = new URL(handle.baseUrl);
   cookie = mergeCookies(cookie, response);
-  for (let i = 0; i < 6; i += 1) {
-    if (response.status !== 302 && response.status !== 303) {
-      break;
+  for (let i = 0; i < 8; i += 1) {
+    if (response.status === 302 || response.status === 303) {
+      const location = response.headers.get("location");
+      assert.ok(location, await response.clone().text());
+      current = new URL(location, handle.baseUrl);
+      if (current.origin === new URL(CLAUDE_REDIRECT).origin) {
+        return { location: current, cookie };
+      }
+      response = await fetch(current, {
+        headers: {
+          cookie,
+          origin: handle.baseUrl,
+          Accept: "text/html",
+        },
+        redirect: "manual",
+      });
+      cookie = mergeCookies(cookie, response);
+      continue;
     }
-    const location = response.headers.get("location");
-    assert.ok(location, await response.clone().text());
-    const next = new URL(location, handle.baseUrl);
-    if (next.origin === new URL(CLAUDE_REDIRECT).origin) {
-      return { location: next, cookie };
+    if (response.status === 200) {
+      const html = await response.text();
+      const nonce = /name="nonce"\s+value="([^"]+)"/.exec(html)?.[1];
+      if (nonce && /name="decision"\s+value="allow"/.test(html)) {
+        response = await fetch(current, {
+          method: "POST",
+          headers: {
+            cookie,
+            origin: handle.baseUrl,
+            Accept: "text/html",
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+          body: new URLSearchParams({ nonce, decision: "allow" }),
+          redirect: "manual",
+        });
+        cookie = mergeCookies(cookie, response);
+        continue;
+      }
+      throw new Error(`did not reach the client redirect, last status 200: ${html.slice(0, 400)}`);
     }
-    response = await fetch(next, {
-      headers: {
-        cookie,
-        origin: handle.baseUrl,
-        Accept: "text/html",
-      },
-      redirect: "manual",
-    });
-    cookie = mergeCookies(cookie, response);
+    break;
   }
   throw new Error(
     `did not reach the client redirect, last status ${response.status}: ${(await response.text()).slice(0, 400)}`
   );
+}
+
+function consentUrlFromAuthorizeRedirect(handle: HttpServerHandle, location: string): URL {
+  const signIn = new URL(location, handle.baseUrl);
+  const consent = new URL(signIn.href);
+  consent.pathname = "/consent";
+  return consent;
+}
+
+function redirectsToClientWithCode(response: Response): boolean {
+  if (response.status !== 302 && response.status !== 303) {
+    return false;
+  }
+  const location = response.headers.get("location");
+  if (!location) {
+    return false;
+  }
+  const next = new URL(location, "http://127.0.0.1");
+  return next.origin === new URL(CLAUDE_REDIRECT).origin && Boolean(next.searchParams.get("code"));
 }
 
 async function submitHelloFresh(
@@ -569,6 +616,115 @@ describe("OAuth DCR + PKCE + refresh", () => {
         }),
       });
       assert.equal(reuse.status, 400);
+    });
+  });
+
+  it("does not issue a code on GET /consent when a session already exists", async () => {
+    await withServer({}, async (handle) => {
+      const { client_id: victimClient } = await registerClient(handle.baseUrl);
+      const victimChallenge = pkce().challenge;
+      const victimForm = await loadAuthorizeForm(handle, victimClient, victimChallenge);
+      const { cookie: victimCookie } = await submitHelloFresh(handle, victimForm.url, {
+        auth_method: "password",
+        country: "fr",
+        email: "victim@example.com",
+        password: CORRECT_PASSWORD,
+      });
+      assert.ok(victimCookie);
+
+      const { client_id: attackerClient } = await registerClient(handle.baseUrl);
+      const attackerChallenge = pkce().challenge;
+      const started = await startAuthorize(handle, attackerClient, attackerChallenge);
+      assert.equal(started.status, 302, await started.clone().text());
+      const signInLocation = started.headers.get("location");
+      assert.ok(signInLocation);
+      const attackerConsent = consentUrlFromAuthorizeRedirect(handle, signInLocation);
+
+      const authorizeWithSession = await startAuthorize(
+        handle,
+        attackerClient,
+        attackerChallenge,
+        "S256",
+        victimCookie
+      );
+      assert.equal(redirectsToClientWithCode(authorizeWithSession), false, await authorizeWithSession.clone().text());
+      const authorizeLocation = authorizeWithSession.headers.get("location") ?? "";
+      assert.doesNotMatch(authorizeLocation, /[?&]code=/);
+
+      const consentGet = await fetch(attackerConsent, {
+        headers: { cookie: victimCookie, Accept: "text/html" },
+        redirect: "manual",
+      });
+      assert.equal(consentGet.status, 200, await consentGet.clone().text());
+      assert.equal(consentGet.headers.get("location"), null);
+      const html = await consentGet.text();
+      assert.match(html, /Allow this connector/);
+      assert.match(html, /name="nonce"/);
+      assert.match(html, /name="decision"\s+value="allow"/);
+      assert.doesNotMatch(html, /[?&]code=/);
+
+      const forged = await fetch(attackerConsent, {
+        method: "POST",
+        headers: {
+          cookie: victimCookie,
+          origin: "https://evil.example",
+          Accept: "text/html",
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({ nonce: "guess", decision: "allow" }),
+        redirect: "manual",
+      });
+      assert.equal(redirectsToClientWithCode(forged), false, await forged.clone().text());
+      assert.ok(forged.status === 403 || forged.status === 400, `unexpected status ${forged.status}`);
+
+      const noCsrf = await fetch(attackerConsent, {
+        method: "POST",
+        headers: {
+          cookie: victimCookie,
+          origin: handle.baseUrl,
+          Accept: "text/html",
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({ nonce: "guess", decision: "allow" }),
+        redirect: "manual",
+      });
+      assert.equal(redirectsToClientWithCode(noCsrf), false, await noCsrf.clone().text());
+      assert.equal(noCsrf.status, 400);
+    });
+  });
+
+  it("clears skipConsent left in SQLite by an older server", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "mcp-oauth-"));
+    const authDbPath = join(dir, "auth.sqlite");
+    let staleClientId = "";
+    await withServer({ authDbPath }, async (handle) => {
+      staleClientId = (await registerClient(handle.baseUrl)).client_id;
+    });
+    const stored = new DatabaseSync(authDbPath);
+    stored.exec("UPDATE oauthClient SET skipConsent = 1");
+    stored.close();
+
+    await withServer({ authDbPath }, async (handle) => {
+      const db = new DatabaseSync(authDbPath, { readOnly: true });
+      const row = db.prepare("SELECT skipConsent FROM oauthClient WHERE clientId = ?").get(staleClientId) as {
+        skipConsent: number | boolean | null;
+      };
+      db.close();
+      assert.equal(Number(row.skipConsent ?? 0), 0);
+
+      const otherClient = (await registerClient(handle.baseUrl)).client_id;
+      const { cookie } = await submitHelloFresh(
+        handle,
+        (await loadAuthorizeForm(handle, otherClient, pkce().challenge)).url,
+        {
+          auth_method: "password",
+          country: "fr",
+          email: "victim@example.com",
+          password: CORRECT_PASSWORD,
+        }
+      );
+      const authorizeStale = await startAuthorize(handle, staleClientId, pkce().challenge, "S256", cookie);
+      assert.equal(redirectsToClientWithCode(authorizeStale), false, await authorizeStale.clone().text());
     });
   });
 
