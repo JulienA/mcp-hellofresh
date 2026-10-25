@@ -46,6 +46,56 @@ const RECIPE_IMAGE_CDN_PREFIX =
   "https://img.hellofresh.com/w_800,c_limit,f_jpg,q_auto,fl_lossy/hellofresh_s3";
 const MAX_RECIPE_IMAGE_BYTES = 2 * 1024 * 1024;
 
+/** Shared across accounts. Recipe JSON is catalog data for a country and locale, not a user. */
+export const RECIPE_DETAILS_TTL_MS = 30 * 60 * 1000;
+const RECIPE_DETAILS_CACHE_MAX = 256;
+
+interface CachedRecipeDetails {
+  expiresAt: number;
+  payload: Record<string, unknown>;
+}
+
+const recipeDetailsCache = new Map<string, CachedRecipeDetails>();
+const recipeDetailsInFlight = new Map<string, Promise<Record<string, unknown>>>();
+
+export function clearRecipeDetailsCache(): void {
+  recipeDetailsCache.clear();
+  recipeDetailsInFlight.clear();
+}
+
+function recipeDetailsKey(country: HelloFreshCountry, recipeId: string): string {
+  return `${country.apiCountry}\0${country.locale}\0${recipeId}`;
+}
+
+function readRecipeDetails(key: string): Record<string, unknown> | undefined {
+  const hit = recipeDetailsCache.get(key);
+  if (!hit) {
+    return undefined;
+  }
+  if (hit.expiresAt <= Date.now()) {
+    recipeDetailsCache.delete(key);
+    return undefined;
+  }
+  recipeDetailsCache.delete(key);
+  recipeDetailsCache.set(key, hit);
+  return structuredClone(hit.payload);
+}
+
+function storeRecipeDetails(key: string, payload: Record<string, unknown>): void {
+  recipeDetailsCache.delete(key);
+  recipeDetailsCache.set(key, {
+    expiresAt: Date.now() + RECIPE_DETAILS_TTL_MS,
+    payload: structuredClone(payload),
+  });
+  while (recipeDetailsCache.size > RECIPE_DETAILS_CACHE_MAX) {
+    const oldest = recipeDetailsCache.keys().next().value;
+    if (oldest === undefined) {
+      break;
+    }
+    recipeDetailsCache.delete(oldest);
+  }
+}
+
 export interface RecipeSummary {
   id: string;
   name: string;
@@ -280,6 +330,30 @@ export class HelloFreshApi {
     if (!bare) {
       throw new HelloFreshApiError("api", "A recipe id is required.");
     }
+    const key = recipeDetailsKey(this.country, bare);
+    const cached = readRecipeDetails(key);
+    if (cached) {
+      return cached;
+    }
+    let flight = recipeDetailsInFlight.get(key);
+    if (!flight) {
+      flight = this.fetchRecipe(bare).then((payload) => {
+        storeRecipeDetails(key, payload);
+        return payload;
+      });
+      recipeDetailsInFlight.set(key, flight);
+      void flight
+        .finally(() => {
+          if (recipeDetailsInFlight.get(key) === flight) {
+            recipeDetailsInFlight.delete(key);
+          }
+        })
+        .catch(() => undefined);
+    }
+    return structuredClone(await flight);
+  }
+
+  private async fetchRecipe(bare: string): Promise<Record<string, unknown>> {
     const payload = await this.getJson(`/gw/recipes/recipes/${encodeURIComponent(bare)}`, {
       country: this.country.apiCountry,
       locale: this.country.locale,

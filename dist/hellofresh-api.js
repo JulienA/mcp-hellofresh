@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.HelloFreshApi = exports.RATE_RECIPE_UNSUPPORTED = exports.RECONNECT_MESSAGE = exports.HelloFreshApiError = void 0;
+exports.HelloFreshApi = exports.RECIPE_DETAILS_TTL_MS = exports.RATE_RECIPE_UNSUPPORTED = exports.RECONNECT_MESSAGE = exports.HelloFreshApiError = void 0;
+exports.clearRecipeDetailsCache = clearRecipeDetailsCache;
 exports.accountFromAuthPayload = accountFromAuthPayload;
 const auth_js_1 = require("./auth.js");
 const accounts_js_1 = require("./accounts.js");
@@ -20,6 +21,45 @@ exports.RATE_RECIPE_UNSUPPORTED = "rate_recipe is not available through the Hell
 const USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const RECIPE_IMAGE_CDN_PREFIX = "https://img.hellofresh.com/w_800,c_limit,f_jpg,q_auto,fl_lossy/hellofresh_s3";
 const MAX_RECIPE_IMAGE_BYTES = 2 * 1024 * 1024;
+/** Shared across accounts. Recipe JSON is catalog data for a country and locale, not a user. */
+exports.RECIPE_DETAILS_TTL_MS = 30 * 60 * 1000;
+const RECIPE_DETAILS_CACHE_MAX = 256;
+const recipeDetailsCache = new Map();
+const recipeDetailsInFlight = new Map();
+function clearRecipeDetailsCache() {
+    recipeDetailsCache.clear();
+    recipeDetailsInFlight.clear();
+}
+function recipeDetailsKey(country, recipeId) {
+    return `${country.apiCountry}\0${country.locale}\0${recipeId}`;
+}
+function readRecipeDetails(key) {
+    const hit = recipeDetailsCache.get(key);
+    if (!hit) {
+        return undefined;
+    }
+    if (hit.expiresAt <= Date.now()) {
+        recipeDetailsCache.delete(key);
+        return undefined;
+    }
+    recipeDetailsCache.delete(key);
+    recipeDetailsCache.set(key, hit);
+    return structuredClone(hit.payload);
+}
+function storeRecipeDetails(key, payload) {
+    recipeDetailsCache.delete(key);
+    recipeDetailsCache.set(key, {
+        expiresAt: Date.now() + exports.RECIPE_DETAILS_TTL_MS,
+        payload: structuredClone(payload),
+    });
+    while (recipeDetailsCache.size > RECIPE_DETAILS_CACHE_MAX) {
+        const oldest = recipeDetailsCache.keys().next().value;
+        if (oldest === undefined) {
+            break;
+        }
+        recipeDetailsCache.delete(oldest);
+    }
+}
 class HelloFreshApi {
     fetchImpl;
     hooks;
@@ -156,6 +196,29 @@ class HelloFreshApi {
         if (!bare) {
             throw new HelloFreshApiError("api", "A recipe id is required.");
         }
+        const key = recipeDetailsKey(this.country, bare);
+        const cached = readRecipeDetails(key);
+        if (cached) {
+            return cached;
+        }
+        let flight = recipeDetailsInFlight.get(key);
+        if (!flight) {
+            flight = this.fetchRecipe(bare).then((payload) => {
+                storeRecipeDetails(key, payload);
+                return payload;
+            });
+            recipeDetailsInFlight.set(key, flight);
+            void flight
+                .finally(() => {
+                if (recipeDetailsInFlight.get(key) === flight) {
+                    recipeDetailsInFlight.delete(key);
+                }
+            })
+                .catch(() => undefined);
+        }
+        return structuredClone(await flight);
+    }
+    async fetchRecipe(bare) {
         const payload = await this.getJson(`/gw/recipes/recipes/${encodeURIComponent(bare)}`, {
             country: this.country.apiCountry,
             locale: this.country.locale,
