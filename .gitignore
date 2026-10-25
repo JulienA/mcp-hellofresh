@@ -1,5 +1,6 @@
 node_modules/
 *.tgz
+dist/
 dist-test/
 session.json
 *.session.json

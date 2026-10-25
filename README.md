@@ -34,8 +34,16 @@ Playwright is optional. It is used only by local `npm run login` (and the stdio 
 
 ## Installation
 
+From npm:
+
 ```bash
 npm install @striderlabs/mcp-hellofresh
+```
+
+From a git checkout, install dependencies and compile TypeScript (`dist/` is not committed):
+
+```bash
+npm ci && npm run build
 ```
 
 For local Google sign-in, also install Chromium:
