@@ -11,8 +11,8 @@ This API is unofficial and can change. A bot-protection block is not a wrong pas
 | `auth_status` | Email, country, whether the access token is still valid, and when it was saved. Never returns tokens. |
 | `login` | Local stdio: open a headed window so you can finish **Continue with Google**, then save `apiV2Auth`. HTTP: tells you to disconnect and reconnect the connector. |
 | `logout` | Delete the saved tokens for this account only. |
-| `get_menu` | Menu for an upcoming week, with prep time, the card label, tags, calories, and allergens |
-| `get_recipe_details` | Recipe payload from `/gw/recipes` |
+| `get_menu` | Menu for an upcoming week, with prep time, the card label, tags, calories, and allergens. Hosts that support MCP Apps also show recipe cards. |
+| `get_recipe_details` | Recipe payload from `/gw/recipes`. Hosts that support MCP Apps also show one recipe card. |
 | `get_recipe_image` | Recipe photo from the HelloFresh CDN |
 | `select_meals` | Save a meal selection for a week. `quantity` is how many cartons of each recipe. |
 | `skip_week` | Skip a delivery week |
@@ -168,9 +168,9 @@ claude mcp add hellofresh -- npx -y @striderlabs/mcp-hellofresh
 
 `logout` deletes only the account linked to this connection.
 
-`get_menu`: `week_offset` optional, 0–4. Each recipe includes `prepTime` (minutes, or `null`), `label` (card badge), `tags`, `calories` (kcal per portion, or `null`), `allergens`, and `allergenTraces`. `get_recipe_details` is for ingredients, steps, and the full nutrition table.
+`get_menu`: `week_offset` optional, 0–4. Each recipe includes `prepTime` (minutes, or `null`), `label` (card badge), `tags`, `calories` (kcal per portion, or `null`), `allergens`, and `allergenTraces`. `get_recipe_details` is for ingredients, steps, and the full nutrition table. The text result stays that JSON. Hosts that render MCP Apps also read `structuredContent` into recipe cards (`ui://hellofresh/menu`). Photos are public `img.hellofresh.com` URLs, not downloaded bytes.
 
-`get_recipe_details`: `recipe_id` required.
+`get_recipe_details`: `recipe_id` required. The text result is the HelloFresh payload. The card (`ui://hellofresh/recipe`) shows the name, photo, time, calories, allergens, ingredients, and steps.
 
 `get_recipe_image`: `recipe_id` required. Returns the photo and its public `img.hellofresh.com` URL. A CloudFront `imageLink` is not fetched; the tool uses `imagePath`, or the `/image/...` part of that link.
 

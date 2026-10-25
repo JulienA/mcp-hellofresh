@@ -1,11 +1,17 @@
-import { Server, type Tool } from "@modelcontextprotocol/server";
+import { ResourceNotFoundError, Server, type CallToolResult, type Tool } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
 import { AuthError, formatAuthToolError, LOGIN_WINDOW_MESSAGE } from "./auth.js";
-import { HelloFreshApiError, RATE_RECIPE_UNSUPPORTED } from "./hellofresh-api.js";
+import {
+  HelloFreshApiError,
+  RATE_RECIPE_UNSUPPORTED,
+  publicRecipeImageUrl,
+  type RecipeSummary,
+} from "./hellofresh-api.js";
 import type { HelloFreshSession } from "./hellofresh-session.js";
 import { errorCode, log } from "./log.js";
 import { assertInteractiveLoginAllowed, HTTP_LOGIN_MESSAGE } from "./login-mode.js";
+import { MENU_UI_URI, RECIPE_UI_URI, listRecipeUiResources, readRecipeUiResource } from "./recipe-ui.js";
 import { currentHelloFreshUserId } from "./request-context.js";
 
 export interface HelloFreshMCPServerOptions {
@@ -180,6 +186,7 @@ const TOOLS: Tool[] = [
         },
       },
     },
+    _meta: uiResourceMeta(MENU_UI_URI),
   },
   {
     name: "get_recipe_details",
@@ -195,6 +202,7 @@ const TOOLS: Tool[] = [
       },
       required: ["recipe_id"],
     },
+    _meta: uiResourceMeta(RECIPE_UI_URI),
   },
   {
     name: "get_recipe_image",
@@ -423,7 +431,17 @@ export class HelloFreshMCPServer {
   constructor(session: HelloFreshSession, options: HelloFreshMCPServerOptions = {}) {
     this.server = new Server(
       { name: "@striderlabs/mcp-hellofresh", version: "1.0.0" },
-      { capabilities: { tools: {} } }
+      {
+        capabilities: {
+          tools: {},
+          resources: {},
+          extensions: {
+            "io.modelcontextprotocol/ui": {
+              mimeTypes: ["text/html;profile=mcp-app"],
+            },
+          },
+        },
+      }
     );
     this.session = session;
     this.allowInteractiveLogin = options.allowInteractiveLogin ?? true;
@@ -435,12 +453,34 @@ export class HelloFreshMCPServer {
       tools: TOOLS,
     }));
 
+    this.server.setRequestHandler("resources/list", async () => ({
+      resources: listRecipeUiResources(),
+    }));
+
+    this.server.setRequestHandler("resources/read", async (request) => {
+      const uri = request.params.uri;
+      const resource = readRecipeUiResource(uri);
+      if (!resource) {
+        throw new ResourceNotFoundError(uri);
+      }
+      return {
+        contents: [
+          {
+            uri: resource.uri,
+            mimeType: resource.mimeType,
+            text: resource.text,
+            ...(resource._meta ? { _meta: resource._meta } : {}),
+          },
+        ],
+      };
+    });
+
     this.server.setRequestHandler("tools/call", async (request) => {
       const { name, arguments: args } = request.params;
       const started = Date.now();
       const userId = currentHelloFreshUserId();
       try {
-        const result = await this.handleTool(name, args ?? {});
+        const result = this.server.projectCallToolResult(await this.handleTool(name, args ?? {}), undefined);
         log.info("mcp.tool", {
           name,
           userId,
@@ -479,12 +519,7 @@ export class HelloFreshMCPServer {
     }
   }
 
-  private async handleTool(
-    name: string,
-    args: Record<string, unknown>
-  ): Promise<{
-    content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>;
-  }> {
+  private async handleTool(name: string, args: Record<string, unknown>): Promise<CallToolResult> {
     const text = (data: unknown): { content: Array<{ type: "text"; text: string }> } => ({
       content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
     });
@@ -525,18 +560,29 @@ export class HelloFreshMCPServer {
       case "get_menu": {
         const params = GetMenuSchema.parse(args);
         const menu = await (await this.session.api()).getMenu(params.week_offset);
-        return text({
+        const payload = {
           week_offset: params.week_offset,
           week_id: menu.weekId,
           recipe_count: menu.recipes.length,
           recipes: menu.recipes,
-        });
+        };
+        return {
+          content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
+          structuredContent: {
+            week_id: menu.weekId,
+            recipes: menu.recipes.map(menuCard),
+          },
+        };
       }
 
       case "get_recipe_details": {
         const params = GetRecipeDetailsSchema.parse(args);
-        const details = await (await this.session.api()).getRecipe(params.recipe_id);
-        return text(details);
+        const api = await this.session.api();
+        const details = await api.getRecipe(params.recipe_id);
+        return {
+          content: [{ type: "text", text: JSON.stringify(details, null, 2) }],
+          structuredContent: api.recipeCard(details),
+        };
       }
 
       case "get_recipe_image": {
@@ -659,4 +705,20 @@ export class HelloFreshMCPServer {
     process.on("SIGINT", shutdown);
     process.on("SIGTERM", shutdown);
   }
+}
+
+function uiResourceMeta(uri: string): NonNullable<Tool["_meta"]> {
+  return {
+    ui: { resourceUri: uri },
+    "ui/resourceUri": uri,
+  };
+}
+
+function menuCard(summary: RecipeSummary): RecipeSummary {
+  const imageUrl = publicRecipeImageUrl(summary.imageUrl);
+  if (!imageUrl) {
+    const { imageUrl: _imageUrl, ...rest } = summary;
+    return rest;
+  }
+  return { ...summary, imageUrl };
 }

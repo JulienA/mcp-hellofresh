@@ -27,6 +27,7 @@
   "author": "Strider Labs",
   "license": "MIT",
   "dependencies": {
+    "@mcp-ui/server": "^6.1.0",
     "@modelcontextprotocol/server": "^2.4.0",
     "lru-cache": "^11.5.3",
     "zod": "^4.6.7"
