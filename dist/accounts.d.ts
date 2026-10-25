@@ -24,7 +24,7 @@ export interface ParsedAuthBlob {
 }
 export declare function normalizeEmail(email: string): string;
 export declare function userIdFor(country: string, email: string): string;
-export declare function resolveUsersDir(oauthStorePath: string, env?: NodeJS.ProcessEnv): string;
+export declare function resolveUsersDir(authDbPath: string, env?: NodeJS.ProcessEnv): string;
 export declare function resolveStdioAccountPath(env?: NodeJS.ProcessEnv): string;
 export declare function accountFilePath(usersDir: string, userId: string): string;
 export declare class AccountStore {

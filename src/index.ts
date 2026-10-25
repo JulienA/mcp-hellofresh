@@ -18,17 +18,18 @@ HTTP flags and environment:
   --host <host>               Bind address (HOST, default 127.0.0.1)
   --port <port>               Bind port (PORT, default 8080)
   PUBLIC_BASE_URL             Public HTTPS origin (required off localhost)
-  MCP_DATA_KEY                32-byte key (base64, base64url, or hex) that encrypts data on disk
-  MCP_OAUTH_STORE_PATH        Persisted OAuth clients and tokens (mode 0600, encrypted)
+  MCP_DATA_KEY                32-byte key (base64, base64url, or hex) that encrypts HelloFresh tokens
+  BETTER_AUTH_SECRET          Optional 32+ character signing secret (defaults to MCP_DATA_KEY)
+  MCP_AUTH_DB_PATH            SQLite file for OAuth clients, codes, refresh tokens, and JWKS
   MCP_USERS_DIR               Directory of per-account HelloFresh tokens
   MCP_OAUTH_REDIRECT_HOSTS    Comma-separated redirect hosts (default: claude.ai, claude.com, chatgpt.com)
   LOG_LEVEL                   debug | info | warn | error (JSON lines on stderr, default info)
   HELLOFRESH_COUNTRY          Country code for stdio login (default us)
 
 Connect https://<host>/mcp in Claude or ChatGPT. Each person signs in on
-/authorize with their HelloFresh password, or pastes apiV2Auth after signing
-in on the HelloFresh website (Continue with Google included). There is no
-shared owner secret. Do not send a Google password.
+the authorize login page with their HelloFresh password, or pastes apiV2Auth
+after signing in on the HelloFresh website (Continue with Google included).
+There is no shared owner secret. Do not send a Google password.
 
 The HelloFresh API used here is unofficial and can change. A bot-protection
 block is not a wrong password.

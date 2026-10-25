@@ -30,11 +30,11 @@ function userIdFor(country, email) {
     }
     return (0, security_js_1.sha256Hex)(`${known.code}\n${normalizeEmail(email)}`);
 }
-function resolveUsersDir(oauthStorePath, env = process.env) {
+function resolveUsersDir(authDbPath, env = process.env) {
     if (env[exports.USERS_DIR_ENV_VAR]?.trim()) {
         return env[exports.USERS_DIR_ENV_VAR].trim();
     }
-    return (0, node_path_1.join)((0, node_path_1.dirname)(oauthStorePath), "users");
+    return (0, node_path_1.join)((0, node_path_1.dirname)(authDbPath), "users");
 }
 function resolveStdioAccountPath(env = process.env) {
     if (env[exports.ACCOUNT_ENV_VAR]?.trim()) {

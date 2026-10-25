@@ -5,6 +5,9 @@ session.json
 *.session.json
 oauth-store.json
 *.oauth-store.json
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
 .mcp-hellofresh/
 .env
 .env.*

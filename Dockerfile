@@ -3,7 +3,7 @@ FROM node:24-bookworm-slim
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=8080 \
-    MCP_OAUTH_STORE_PATH=/data/oauth-store.json \
+    MCP_AUTH_DB_PATH=/data/auth.sqlite \
     MCP_USERS_DIR=/data/users
 
 WORKDIR /app

@@ -13,6 +13,8 @@ export interface HttpServerOptions {
     fetchImpl?: FetchLike;
     /** Injected in tests. Production links accounts through /gw. */
     linker?: AccountLinker;
+    /** Test-only override for JWT access-token lifetime. */
+    accessTokenExpiresIn?: number;
 }
 export declare function startHttpServer(config: HttpRuntimeConfig, options?: HttpServerOptions): Promise<HttpServerHandle>;
 //# sourceMappingURL=http.d.ts.map

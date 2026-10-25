@@ -3,20 +3,17 @@ export declare const MCP_SCOPE = "mcp";
 export declare const ACCESS_TOKEN_TTL_SEC: number;
 export declare const REFRESH_TOKEN_TTL_SEC: number;
 export declare const AUTH_CODE_TTL_SEC: number;
-export declare const DEFAULT_AUTHORIZE_MAX_ATTEMPTS = 10;
-export declare const DEFAULT_AUTHORIZE_WINDOW_MS: number;
 export interface HttpRuntimeConfig {
     host: string;
     port: number;
     publicBaseUrl: URL;
     issuer: URL;
     resourceUrl: URL;
-    oauthStorePath: string;
+    authDbPath: string;
     usersDir: string;
+    authSecret: string;
     redirectHosts: string[];
     allowLoopbackRedirects: boolean;
-    authorizeMaxAttempts: number;
-    authorizeWindowMs: number;
     dangerouslyAllowInsecureIssuerUrl: boolean;
 }
 export declare class ConfigError extends Error {

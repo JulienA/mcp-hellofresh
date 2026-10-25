@@ -44,11 +44,11 @@ export function userIdFor(country: string, email: string): string {
   return sha256Hex(`${known.code}\n${normalizeEmail(email)}`);
 }
 
-export function resolveUsersDir(oauthStorePath: string, env: NodeJS.ProcessEnv = process.env): string {
+export function resolveUsersDir(authDbPath: string, env: NodeJS.ProcessEnv = process.env): string {
   if (env[USERS_DIR_ENV_VAR]?.trim()) {
     return env[USERS_DIR_ENV_VAR].trim();
   }
-  return join(dirname(oauthStorePath), "users");
+  return join(dirname(authDbPath), "users");
 }
 
 export function resolveStdioAccountPath(env: NodeJS.ProcessEnv = process.env): string {

@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.ConfigError = exports.DEFAULT_AUTHORIZE_WINDOW_MS = exports.DEFAULT_AUTHORIZE_MAX_ATTEMPTS = exports.AUTH_CODE_TTL_SEC = exports.REFRESH_TOKEN_TTL_SEC = exports.ACCESS_TOKEN_TTL_SEC = exports.MCP_SCOPE = exports.DEFAULT_REDIRECT_HOSTS = void 0;
+exports.ConfigError = exports.AUTH_CODE_TTL_SEC = exports.REFRESH_TOKEN_TTL_SEC = exports.ACCESS_TOKEN_TTL_SEC = exports.MCP_SCOPE = exports.DEFAULT_REDIRECT_HOSTS = void 0;
 exports.isLoopbackHostname = isLoopbackHostname;
 exports.isLocalIssuer = isLocalIssuer;
 exports.loadHttpRuntimeConfig = loadHttpRuntimeConfig;
@@ -13,8 +13,6 @@ exports.MCP_SCOPE = "mcp";
 exports.ACCESS_TOKEN_TTL_SEC = 60 * 60;
 exports.REFRESH_TOKEN_TTL_SEC = 60 * 60 * 24 * 30;
 exports.AUTH_CODE_TTL_SEC = 5 * 60;
-exports.DEFAULT_AUTHORIZE_MAX_ATTEMPTS = 10;
-exports.DEFAULT_AUTHORIZE_WINDOW_MS = 15 * 60 * 1000;
 class ConfigError extends Error {
     constructor(message) {
         super(message);
@@ -36,18 +34,18 @@ function parsePositiveInt(value, fallback) {
     const parsed = Number.parseInt(value, 10);
     return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
-function resolveOAuthStorePath(env) {
-    if (env.MCP_OAUTH_STORE_PATH) {
-        return env.MCP_OAUTH_STORE_PATH;
+function resolveAuthDbPath(env) {
+    if (env.MCP_AUTH_DB_PATH) {
+        return env.MCP_AUTH_DB_PATH;
     }
     if (env.XDG_CONFIG_HOME) {
-        return (0, node_path_1.join)(env.XDG_CONFIG_HOME, "mcp-hellofresh", "oauth-store.json");
+        return (0, node_path_1.join)(env.XDG_CONFIG_HOME, "mcp-hellofresh", "auth.sqlite");
     }
     if (process.platform === "win32") {
         const root = env.APPDATA || (0, node_path_1.join)((0, node_os_1.homedir)(), "AppData", "Roaming");
-        return (0, node_path_1.join)(root, "mcp-hellofresh", "oauth-store.json");
+        return (0, node_path_1.join)(root, "mcp-hellofresh", "auth.sqlite");
     }
-    return (0, node_path_1.join)((0, node_os_1.homedir)(), ".config", "mcp-hellofresh", "oauth-store.json");
+    return (0, node_path_1.join)((0, node_os_1.homedir)(), ".config", "mcp-hellofresh", "auth.sqlite");
 }
 function parseRedirectHosts(env) {
     const raw = env.MCP_OAUTH_REDIRECT_HOSTS?.trim();
@@ -67,6 +65,16 @@ function argvValue(argv, flag) {
     const prefix = `${flag}=`;
     const matched = argv.find((item) => item.startsWith(prefix));
     return matched ? matched.slice(prefix.length) : undefined;
+}
+function resolveAuthSecret(env) {
+    const dedicated = env.BETTER_AUTH_SECRET?.trim();
+    if (dedicated) {
+        if (dedicated.length < 32) {
+            throw new ConfigError("BETTER_AUTH_SECRET must be at least 32 characters.");
+        }
+        return dedicated;
+    }
+    return env.MCP_DATA_KEY?.trim() ?? "";
 }
 function loadHttpRuntimeConfig(env = process.env, argv = process.argv.slice(2)) {
     const host = argvValue(argv, "--host") || env.HOST || "127.0.0.1";
@@ -96,19 +104,18 @@ function loadHttpRuntimeConfig(env = process.env, argv = process.argv.slice(2)) 
     }
     const issuer = new URL(publicBaseUrl.origin);
     const resourceUrl = new URL("/mcp", issuer);
-    const oauthStorePath = resolveOAuthStorePath(env);
+    const authDbPath = resolveAuthDbPath(env);
     return {
         host,
         port,
         publicBaseUrl: issuer,
         issuer,
         resourceUrl,
-        oauthStorePath,
-        usersDir: (0, accounts_js_1.resolveUsersDir)(oauthStorePath, env),
+        authDbPath,
+        usersDir: (0, accounts_js_1.resolveUsersDir)(authDbPath, env),
+        authSecret: resolveAuthSecret(env),
         redirectHosts: parseRedirectHosts(env),
         allowLoopbackRedirects: env.MCP_OAUTH_ALLOW_LOOPBACK !== "0",
-        authorizeMaxAttempts: parsePositiveInt(env.MCP_AUTHORIZE_MAX_ATTEMPTS, exports.DEFAULT_AUTHORIZE_MAX_ATTEMPTS),
-        authorizeWindowMs: parsePositiveInt(env.MCP_AUTHORIZE_WINDOW_MS, exports.DEFAULT_AUTHORIZE_WINDOW_MS),
         dangerouslyAllowInsecureIssuerUrl: isLocalIssuer(issuer),
     };
 }
