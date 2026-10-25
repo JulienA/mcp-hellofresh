@@ -153,7 +153,7 @@ const TOOLS: Tool[] = [
   {
     name: "get_menu",
     description:
-      "Get the current week's available recipes/meals from HelloFresh. Optionally specify a week offset to see future menus.",
+      "Get the current week's available recipes/meals from HelloFresh. Optionally specify a week offset to see future menus. Each recipe includes imageUrl, an absolute HTTPS URL the client may show in a carousel, when HelloFresh provides an image.",
     inputSchema: {
       type: "object",
       properties: {
@@ -171,7 +171,7 @@ const TOOLS: Tool[] = [
   {
     name: "get_recipe_details",
     description:
-      "Get full recipe information including ingredients, step-by-step instructions, nutrition facts, prep time, and allergen information.",
+      "Get full recipe information including ingredients, step-by-step instructions, nutrition facts, prep time, and allergen information. The result includes imageUrl, an absolute HTTPS URL the client may show in a carousel, when HelloFresh provides an image.",
     inputSchema: {
       type: "object",
       properties: {
@@ -229,7 +229,7 @@ const TOOLS: Tool[] = [
   {
     name: "get_delivery_schedule",
     description:
-      "View all upcoming deliveries including dates, selected meals, and delivery status.",
+      "View all upcoming deliveries including dates, selected meals, and delivery status. Each selected meal includes imageUrl, an absolute HTTPS URL the client may show in a carousel, when HelloFresh provides an image.",
     inputSchema: {
       type: "object",
       properties: {},

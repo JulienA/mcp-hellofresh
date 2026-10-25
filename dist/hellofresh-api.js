@@ -142,7 +142,14 @@ class HelloFreshApi {
                 country: this.country.apiCountry,
                 locale: this.country.locale,
             });
-            return payload && typeof payload === "object" ? payload : { id: bare };
+            const record = payload && typeof payload === "object" && !Array.isArray(payload)
+                ? { ...payload }
+                : { id: bare };
+            const imageUrl = recipeImageUrl(record);
+            if (imageUrl) {
+                record.imageUrl = imageUrl;
+            }
+            return record;
         });
     }
     async selectMeals(weekId, meals) {
@@ -814,6 +821,69 @@ function weekFromRaw(value, fallbackSubscription) {
         raw,
     };
 }
+const RECIPE_IMAGE_KEYS = ["imageLink", "imageUrl", "image", "websiteImage", "imagePath"];
+const HELLOFRESH_CDN = "https://img.hellofresh.com/w_720,q_auto,f_auto,c_limit,fl_lossy/hellofresh_s3";
+function recipeImageUrl(recipe) {
+    for (const key of RECIPE_IMAGE_KEYS) {
+        const absolute = absoluteFromImageValue(recipe[key]);
+        if (absolute) {
+            return absolute;
+        }
+    }
+    for (const key of RECIPE_IMAGE_KEYS) {
+        const path = relativeFromImageValue(recipe[key]);
+        if (path) {
+            return helloFreshCdnUrl(path);
+        }
+    }
+    return undefined;
+}
+function absoluteFromImageValue(value) {
+    if (typeof value === "string") {
+        return absoluteHttpUrl(value);
+    }
+    const record = asRecord(value);
+    if (!record) {
+        return undefined;
+    }
+    return absoluteHttpUrl(record.link) ?? absoluteHttpUrl(record.url) ?? absoluteHttpUrl(record.path);
+}
+function relativeFromImageValue(value) {
+    if (typeof value === "string") {
+        return relativeImagePath(value);
+    }
+    const record = asRecord(value);
+    if (!record) {
+        return undefined;
+    }
+    return relativeImagePath(record.path) ?? relativeImagePath(record.link) ?? relativeImagePath(record.url);
+}
+function absoluteHttpUrl(value) {
+    if (typeof value !== "string") {
+        return undefined;
+    }
+    const trimmed = value.trim();
+    return /^https?:\/\//i.test(trimmed) ? trimmed : undefined;
+}
+function relativeImagePath(value) {
+    if (typeof value !== "string") {
+        return undefined;
+    }
+    const trimmed = value.trim();
+    if (!trimmed || /^https?:\/\//i.test(trimmed)) {
+        return undefined;
+    }
+    return trimmed;
+}
+function helloFreshCdnUrl(path) {
+    const normalized = path.startsWith("/") ? path : `/${path}`;
+    const marker = "/hellofresh_s3";
+    const at = normalized.indexOf(marker);
+    if (at >= 0) {
+        return `https://img.hellofresh.com/w_720,q_auto,f_auto,c_limit,fl_lossy${normalized.slice(at)}`;
+    }
+    return `${HELLOFRESH_CDN}${normalized}`;
+}
 function selectedMealsFromPayload(payload) {
     const selected = [];
     for (const meal of asList(payload, ["meals", "courses", "recipes", "items"])) {
@@ -831,7 +901,13 @@ function selectedMealsFromPayload(payload) {
         if (!recipeId || !recipeName) {
             continue;
         }
-        selected.push({ recipeId, recipeName, servings });
+        const imageUrl = recipeImageUrl(recipe);
+        selected.push({
+            recipeId,
+            recipeName,
+            servings,
+            ...(imageUrl ? { imageUrl } : {}),
+        });
     }
     return selected;
 }
@@ -863,11 +939,12 @@ function recipesFromPayload(payload) {
         if (!id || !name) {
             continue;
         }
+        const imageUrl = recipeImageUrl(recipe);
         recipes.push({
             id,
             name,
             description: stringField(recipe, ["headline", "description"]) ?? "",
-            imageUrl: stringField(recipe, ["imagePath", "image", "imageUrl"]),
+            ...(imageUrl ? { imageUrl } : {}),
             prepTime: numberField(recipe, ["prepTime", "totalTime"]) ?? 0,
             tags: [],
             index: numberField(record, ["index"]),

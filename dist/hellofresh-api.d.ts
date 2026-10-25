@@ -29,6 +29,7 @@ export interface SelectedMeal {
     recipeId: string;
     recipeName: string;
     servings: number;
+    imageUrl?: string;
 }
 export interface DeliveryWeek {
     weekId: string;

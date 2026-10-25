@@ -589,6 +589,131 @@ describe("upcoming deliveries", () => {
   });
 });
 
+const CDN = "https://img.hellofresh.com/w_720,q_auto,f_auto,c_limit,fl_lossy/hellofresh_s3";
+
+describe("recipe image URLs", () => {
+  function apiFor(options: { meals?: unknown[]; recipe?: unknown } = {}): HelloFreshApi {
+    const { fetchImpl } = recorded((call) => {
+      if (call.url.includes("/my-deliveries/menu")) {
+        return Response.json({ week: WEEK, meals: options.meals ?? [] });
+      }
+      if (call.url.includes("/recipes/recipes/")) {
+        return Response.json(options.recipe ?? { id: "recipe-9", name: "Tacos" });
+      }
+      return okAccount(call) ?? Response.json({}, { status: 404 });
+    });
+    return new HelloFreshApi(stored("access", Math.floor(Date.now() / 1000), 1800), fetchImpl);
+  }
+
+  it("prefers an absolute image over a relative imagePath", async () => {
+    const api = apiFor({
+      meals: [
+        {
+          index: 1,
+          recipe: {
+            id: "recipe-9",
+            name: "Tacos",
+            imagePath: "/image/tacos.jpg",
+            image: "https://img.hellofresh.com/already.jpg",
+          },
+        },
+      ],
+    });
+    const menu = await api.getMenu(0);
+    assert.equal(menu.recipes[0]?.imageUrl, "https://img.hellofresh.com/already.jpg");
+  });
+
+  it("expands a relative imagePath onto the HelloFresh CDN", async () => {
+    const api = apiFor({
+      meals: [
+        {
+          index: 1,
+          recipe: { id: "recipe-9", name: "Tacos", imagePath: "/image/foo.jpg" },
+        },
+      ],
+    });
+    const menu = await api.getMenu(0);
+    assert.equal(menu.recipes[0]?.imageUrl, `${CDN}/image/foo.jpg`);
+  });
+
+  it("keeps an absolute image URL unchanged", async () => {
+    const absolute = "https://cdn.example/hellofresh/photo.jpg";
+    const api = apiFor({
+      meals: [{ index: 1, recipe: { id: "recipe-9", name: "Tacos", imagePath: absolute } }],
+    });
+    const menu = await api.getMenu(0);
+    assert.equal(menu.recipes[0]?.imageUrl, absolute);
+  });
+
+  it("uses a linked image object and does not double a hellofresh_s3 path", async () => {
+    const linked = apiFor({
+      meals: [
+        {
+          index: 1,
+          recipe: {
+            id: "recipe-9",
+            name: "Tacos",
+            image: { link: "https://img.hellofresh.com/card.jpg", path: "/image/ignored.jpg" },
+          },
+        },
+      ],
+    });
+    const fromObject = await linked.getMenu(0);
+    assert.equal(fromObject.recipes[0]?.imageUrl, "https://img.hellofresh.com/card.jpg");
+
+    const nested = apiFor({
+      meals: [
+        {
+          index: 1,
+          recipe: { id: "recipe-9", name: "Tacos", imagePath: "hellofresh_s3/image/foo.jpg" },
+        },
+      ],
+    });
+    const fromPath = await nested.getMenu(0);
+    assert.equal(fromPath.recipes[0]?.imageUrl, `${CDN}/image/foo.jpg`);
+  });
+
+  it("adds imageUrl on selected meals", async () => {
+    const api = apiFor({
+      meals: [
+        {
+          index: 1,
+          selection: { quantity: 1 },
+          recipe: { id: "recipe-9", name: "Tacos", imagePath: "/image/foo.jpg" },
+        },
+      ],
+    });
+    const deliveries = await api.getDeliveries();
+    assert.deepEqual(deliveries[0]?.meals, [
+      {
+        recipeId: "recipe-9",
+        recipeName: "Tacos",
+        servings: 1,
+        imageUrl: `${CDN}/image/foo.jpg`,
+      },
+    ]);
+  });
+
+  it("adds imageUrl to recipe details without dropping other fields", async () => {
+    const api = apiFor({
+      recipe: {
+        id: "recipe-9",
+        name: "Tacos",
+        headline: "Crispy",
+        imagePath: "/image/foo.jpg",
+        ingredients: [{ name: "Tortilla" }],
+      },
+    });
+    const details = await api.getRecipe("recipe-9");
+    assert.equal(details.id, "recipe-9");
+    assert.equal(details.name, "Tacos");
+    assert.equal(details.headline, "Crispy");
+    assert.equal(details.imagePath, "/image/foo.jpg");
+    assert.deepEqual(details.ingredients, [{ name: "Tortilla" }]);
+    assert.equal(details.imageUrl, `${CDN}/image/foo.jpg`);
+  });
+});
+
 function stored(accessToken: string, issuedAt: number, expiresIn: number): StoredAccount {
   return {
     userId: userIdFor("fr", "ada@example.com"),
