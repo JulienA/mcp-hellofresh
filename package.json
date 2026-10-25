@@ -14,7 +14,7 @@
     "start": "node dist/index.js",
     "start:http": "node dist/index.js --http",
     "login": "node dist/login-cli.js",
-    "test": "rm -rf dist-test && tsc -p tsconfig.test.json && node --test dist-test/*.test.js",
+    "test": "tsc -p tsconfig.test.json && node --test dist-test/*.test.js",
     "pack": "npm pack"
   },
   "keywords": [

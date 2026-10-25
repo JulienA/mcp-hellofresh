@@ -170,15 +170,38 @@ function page(appName: string, mode: "menu" | "recipe"): string {
   .toolbar input, .toolbar select { padding: 6px 8px; }
   .toolbar input { min-width: 140px; flex: 1; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
-  .card { border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); border-radius: 12px; overflow: hidden; background: Canvas; }
+  .card { display: flex; flex-direction: column; height: 100%; border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); border-radius: 12px; overflow: hidden; background: Canvas; }
   .card img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: cover; background: color-mix(in srgb, CanvasText 8%, Canvas); }
-  .body { display: grid; gap: 6px; padding: 10px 12px 12px; }
+  .body { display: flex; flex-direction: column; flex: 1; gap: 6px; padding: 10px 12px 12px; }
   .name { margin: 0; font-size: 16px; }
   .desc, .allergens { margin: 0; color: color-mix(in srgb, CanvasText 78%, Canvas); }
-  .badges, .meta { display: flex; flex-wrap: wrap; gap: 6px; }
-  .badges span, .meta span { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: color-mix(in srgb, CanvasText 8%, Canvas); }
+  .badges, .meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .badge, .meta-chip {
+    font-size: 12px; font-weight: 550; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+  }
+  .badge--label {
+    color: color-mix(in srgb, #3f6212 88%, CanvasText);
+    background: color-mix(in srgb, #84cc16 28%, Canvas);
+  }
+  .badge--tone-0 { color: color-mix(in srgb, #b45309 88%, CanvasText); background: color-mix(in srgb, #fbbf24 30%, Canvas); }
+  .badge--tone-1 { color: color-mix(in srgb, #047857 88%, CanvasText); background: color-mix(in srgb, #34d399 28%, Canvas); }
+  .badge--tone-2 { color: color-mix(in srgb, #1d4ed8 88%, CanvasText); background: color-mix(in srgb, #60a5fa 28%, Canvas); }
+  .badge--tone-3 { color: color-mix(in srgb, #be185d 88%, CanvasText); background: color-mix(in srgb, #f472b6 28%, Canvas); }
+  .badge--tone-4 { color: color-mix(in srgb, #c2410c 88%, CanvasText); background: color-mix(in srgb, #fb923c 30%, Canvas); }
+  .badge--tone-5 { color: color-mix(in srgb, #6d28d9 88%, CanvasText); background: color-mix(in srgb, #a78bfa 30%, Canvas); }
+  .meta-chip { display: inline-flex; align-items: center; gap: 5px; font-weight: 500; }
+  .meta-chip--time {
+    color: color-mix(in srgb, #1d4ed8 85%, CanvasText);
+    background: color-mix(in srgb, #93c5fd 26%, Canvas);
+  }
+  .meta-chip--cal {
+    color: color-mix(in srgb, #c2410c 88%, CanvasText);
+    background: color-mix(in srgb, #fdba74 30%, Canvas);
+  }
+  .chip-icon { display: block; flex-shrink: 0; }
   .allergens { font-size: 12px; }
-  .validate { justify-self: start; padding: 6px 10px; cursor: pointer; background: color-mix(in srgb, CanvasText 8%, Canvas); }
+  .validate { align-self: start; margin-top: auto; padding: 6px 10px; cursor: pointer; background: color-mix(in srgb, CanvasText 8%, Canvas); }
   .pager { display: flex; align-items: center; gap: 8px; margin: 12px 0 0; }
   .pager button { padding: 6px 10px; cursor: pointer; background: color-mix(in srgb, CanvasText 8%, Canvas); }
   .pager button:disabled, .validate:disabled { opacity: 0.5; cursor: default; }
@@ -204,6 +227,44 @@ let pagerEl = null;
 
 function text(el, value) {
   el.textContent = value == null ? "" : String(value);
+}
+
+function badgeToneClass(label) {
+  let hash = 0;
+  const s = String(label);
+  for (let i = 0; i < s.length; i++) hash = (hash * 31 + s.charCodeAt(i)) | 0;
+  return "badge--tone-" + (Math.abs(hash) % 6);
+}
+
+function chipIcon(kind) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "chip-icon");
+  svg.setAttribute("width", "14");
+  svg.setAttribute("height", "14");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("fill", "currentColor");
+  if (kind === "time") {
+    path.setAttribute(
+      "d",
+      "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm.75 5a.75.75 0 0 0-1.5 0v5.69l3.22 1.84a.75.75 0 1 0 .74-1.3l-2.96-1.7V7z"
+    );
+  } else {
+    path.setAttribute(
+      "d",
+      "M12 23c-4.2 0-7.5-3.3-7.5-7.5 0-2.9 1.7-5.5 4.2-6.7-.6 2.2.4 4.5 2.3 5.8-1.1-3.5.3-6.7 3.5-10.5 3.2 3.8 4.6 7 3.5 10.5 1.9-1.3 2.9-3.6 2.3-5.8 2.5 1.2 4.2 3.8 4.2 6.7C19.5 19.7 16.2 23 12 23z"
+    );
+  }
+  svg.append(path);
+  return svg;
+}
+
+function metaChip(kind, label) {
+  const item = document.createElement("span");
+  item.className = "meta-chip meta-chip--" + kind;
+  item.append(chipIcon(kind === "time" ? "time" : "cal"), document.createTextNode(label));
+  return item;
 }
 
 function cdnSrc(url) {
@@ -306,26 +367,29 @@ function fillCard(recipe, forMenu) {
   }
   const badges = document.createElement("div");
   badges.className = "badges";
-  const labels = [];
-  if (recipe && recipe.label) labels.push(recipe.label);
-  if (recipe && Array.isArray(recipe.tags)) labels.push.apply(labels, recipe.tags);
-  for (const label of labels) {
+  if (recipe && recipe.label) {
     const badge = document.createElement("span");
-    text(badge, label);
+    badge.className = "badge badge--label";
+    text(badge, recipe.label);
     badges.append(badge);
+  }
+  if (recipe && Array.isArray(recipe.tags)) {
+    for (const tag of recipe.tags) {
+      if (typeof tag !== "string" || !tag) continue;
+      const badge = document.createElement("span");
+      badge.className = "badge " + badgeToneClass(tag);
+      text(badge, tag);
+      badges.append(badge);
+    }
   }
   if (badges.childNodes.length) body.append(badges);
   const meta = document.createElement("div");
   meta.className = "meta";
   if (recipe && typeof recipe.prepTime === "number") {
-    const item = document.createElement("span");
-    text(item, recipe.prepTime + " min");
-    meta.append(item);
+    meta.append(metaChip("time", recipe.prepTime + " min"));
   }
   if (forMenu && recipe && typeof recipe.calories === "number") {
-    const item = document.createElement("span");
-    text(item, recipe.calories + " kcal");
-    meta.append(item);
+    meta.append(metaChip("cal", recipe.calories + " kcal"));
   }
   if (meta.childNodes.length) body.append(meta);
   if (forMenu) {
