@@ -34,17 +34,16 @@ Playwright is optional. It is used only by local `npm run login` (and the stdio 
 
 ## Installation
 
-From npm:
+This project is run from a **git checkout**, not from npm. TypeScript is compiled locally (`dist/` is not committed), so `npm install @striderlabs/mcp-hellofresh` and `npx mcp-hellofresh` do not work until you clone, build, and run the files under `dist/` yourself (or use the Docker image for HTTP).
 
 ```bash
-npm install @striderlabs/mcp-hellofresh
+git clone https://github.com/JulienA/mcp-hellofresh.git
+cd mcp-hellofresh
+npm ci
+npm run build
 ```
 
-From a git checkout, install dependencies and compile TypeScript (`dist/` is not committed):
-
-```bash
-npm ci && npm run build
-```
+After `npm run build`, the CLI entry points are `dist/index.js` (stdio or `--http`) and `dist/login-cli.js` (`npm run login`).
 
 For local Google sign-in, also install Chromium:
 
@@ -54,11 +53,13 @@ npx playwright install chromium
 
 ## Remote HTTP (claude.ai and ChatGPT)
 
+From the repo (after `npm run build`), with `MCP_DATA_KEY` set:
+
 ```bash
-npx mcp-hellofresh --http
+npm run start:http
 ```
 
-Connector URL: `https://<your-host>/mcp`
+Or Docker (see below), which runs `npm run build` inside the image. Connector URL: `https://<your-host>/mcp`
 
 One process stores many HelloFresh accounts. The account id is the SHA-256 of the country code, a newline, and the trimmed lowercased email. The same country and email from Claude and from ChatGPT share `users/<userId>/tokens.json` in the users directory. That file is mode `0600` and encrypted with `MCP_DATA_KEY`. Another country is another account.
 
@@ -139,12 +140,14 @@ PUBLIC_BASE_URL='https://hf-mcp.example.com' MCP_DATA_KEY='paste-32-byte-base64u
 
 One person, one process, one file. The file is `HELLOFRESH_ACCOUNT_PATH`, or `~/.config/mcp-hellofresh/account.json` (Windows: `%APPDATA%\mcp-hellofresh\account.json`). `XDG_CONFIG_HOME` is honored. This is not the HTTP `users/` directory. `MCP_DATA_KEY` encrypts that file, and the process will not start without it.
 
+Use the absolute path to your checkout (replace `/path/to/mcp-hellofresh`):
+
 ```json
 {
   "mcpServers": {
     "hellofresh": {
-      "command": "npx",
-      "args": ["-y", "@striderlabs/mcp-hellofresh"],
+      "command": "node",
+      "args": ["/path/to/mcp-hellofresh/dist/index.js"],
       "env": {
         "HELLOFRESH_COUNTRY": "fr",
         "MCP_DATA_KEY": "paste-32-byte-base64url-key"
@@ -159,7 +162,7 @@ Password accounts can set `HELLOFRESH_EMAIL` and `HELLOFRESH_PASSWORD`. Those ar
 Google, Apple, or Facebook accounts: on a machine with a display, run `npm run login` (or the `login` tool). Finish **Continue with Google** in the window. The command reads `apiV2Auth` and saves tokens to that file (mode `0600`, encrypted with `MCP_DATA_KEY`). Do not type a Google password into the chat, the terminal, or an MCP prompt.
 
 ```bash
-claude mcp add hellofresh -- npx -y @striderlabs/mcp-hellofresh
+claude mcp add hellofresh -- node /path/to/mcp-hellofresh/dist/index.js
 ```
 
 ## Example prompts
