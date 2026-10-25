@@ -64,11 +64,15 @@ export function toAuthError(error: unknown): AuthError {
   return AuthError.loginFailed(message, cause);
 }
 
+function isHelloFreshApiError(error: unknown): error is Error & { code: string } {
+  return error instanceof Error && error.name === "HelloFreshApiError" && "code" in error;
+}
+
 export function formatAuthToolError(error: unknown): {
   content: Array<{ type: "text"; text: string }>;
   isError: true;
 } {
-  if (error instanceof AuthError) {
+  if (error instanceof AuthError || isHelloFreshApiError(error)) {
     return {
       content: [
         {

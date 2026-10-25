@@ -1,201 +1,168 @@
 # @striderlabs/mcp-hellofresh
 
-A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) connector for [HelloFresh](https://www.hellofresh.com) meal kit delivery. Enables AI assistants like Claude to manage your HelloFresh account — browse menus, select meals, manage deliveries, update preferences, and more.
+A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) connector for [HelloFresh](https://www.hellofresh.com). Claude and ChatGPT each connect as themselves. On `/authorize`, that person signs in to their own HelloFresh account. Tools then call HelloFresh's `/gw` API for that account only.
+
+This API is unofficial and can change. A bot-protection block is not a wrong password.
 
 ## Features
 
 | Tool | Description |
 |------|-------------|
-| `auth_status` | Whether a HelloFresh session exists and looks valid (no cookie values) |
-| `login` | Open a headed browser so you can complete **Continue with Google** |
-| `logout` | Delete the saved session and close the browser |
-| `get_menu` | Browse current week's recipes with filters |
-| `get_recipe_details` | Full recipe info: ingredients, instructions, nutrition |
-| `select_meals` | Choose meals for an upcoming delivery |
+| `auth_status` | Email, country, whether the access token is still valid, and when it was saved. Never returns tokens. |
+| `login` | Local stdio: open a headed window so you can finish **Continue with Google**, then save `apiV2Auth`. HTTP: tells you to disconnect and reconnect the connector. |
+| `logout` | Delete the saved tokens for this account only. |
+| `get_menu` | Menu for an upcoming week |
+| `get_recipe_details` | Recipe payload from `/gw/recipes` |
+| `select_meals` | Save a meal selection for a week |
 | `skip_week` | Skip a delivery week |
-| `get_delivery_schedule` | View all upcoming deliveries |
-| `modify_delivery` | Change a delivery date |
-| `get_preferences` | View dietary preferences and allergens |
-| `update_preferences` | Update dietary/cuisine preferences |
-| `get_subscription` | View current plan (servings, frequency, price) |
-| `modify_subscription` | Change plan size or delivery frequency |
-| `get_past_orders` | Browse order history |
-| `rate_recipe` | Rate a recipe after cooking |
+| `get_delivery_schedule` | Upcoming deliveries |
+| `modify_delivery` | Move one delivery to another date HelloFresh offers |
+| `get_preferences` | Food profile |
+| `update_preferences` | Update the food profile |
+| `get_subscription` | Plan size and next delivery |
+| `modify_subscription` | Change meals or servings. Delivery frequency is left unchanged. |
+| `get_past_orders` | Past deliveries |
+| `rate_recipe` | Not available through this API. The tool says so. |
 
 ## Requirements
 
 - Node.js 20+
-- A HelloFresh account (Google SSO or a HelloFresh password account)
-- Playwright Chromium (`npx playwright install chromium`)
-- **A display** for the first Google sign-in (`login` tool or `npm run login`)
+- A HelloFresh account in a supported country (`us`, `ca`, `uk`, `au`, `nz`, `de`, `at`, `ch`, `nl`, `be`, `lu`, `fr`, `ie`, `dk`, `no`, `se`)
+
+Playwright is optional. It is used only by local `npm run login` (and the stdio `login` tool) so you can finish Google sign-in in a window on your machine. The HTTP server does not launch a browser.
 
 ## Installation
 
 ```bash
 npm install @striderlabs/mcp-hellofresh
+```
+
+For local Google sign-in, also install Chromium:
+
+```bash
 npx playwright install chromium
 ```
 
-## Authentication (Google SSO)
-
-HelloFresh Google accounts **cannot** sign in with `HELLOFRESH_EMAIL` / `HELLOFRESH_PASSWORD`. This connector never stores, requests, or automates Google credentials. There is no `GOOGLE_PASSWORD` (or similar) setting.
-
-**One-time interactive login:**
-
-1. On a machine **with a screen**, from this package:
-   ```bash
-   npm run login
-   ```
-   or ask Claude to run the `login` tool (same headed Chromium window).
-2. In the window, click **Continue with Google** and finish Google's sign-in yourself (including 2FA).
-3. When HelloFresh shows a logged-in page, the tool saves Playwright `storageState` (HelloFresh cookies only, file mode `0600`) and closes the window.
-4. Later MCP calls reload that file, probe it, and reuse it until it expires.
-
-If the session expires, `auth_status` reports `valid: false` and other tools return `expired` / `missing_session` with *Session expired, run login again*. Repeat step 1. The server will **not** reopen Google SSO by itself.
-
-Default session path: `~/.config/mcp-hellofresh/session.json`  
-(Windows: `%APPDATA%\mcp-hellofresh\session.json`). Override with `HELLOFRESH_SESSION_PATH`.
-
-`login` / `npm run login` need a display. On Linux set `DISPLAY` (or Wayland). If the MCP client runs headless, use `npm run login` on a desktop, with `HELLOFRESH_SESSION_PATH` pointing at the same file the server reads.
-
-Optional fallback **only** for HelloFresh password accounts (not Google):
+## Remote HTTP (claude.ai and ChatGPT)
 
 ```bash
-export HELLOFRESH_EMAIL="your@email.com"
-export HELLOFRESH_PASSWORD="your-hellofresh-password"
+npx mcp-hellofresh --http
 ```
 
-## Usage with Claude Desktop
+Connector URL: `https://<your-host>/mcp`
 
-Add to your `claude_desktop_config.json`:
+HelloFresh does not offer third-party OAuth. Claude and ChatGPT complete OAuth against this server (dynamic client registration, PKCE, refresh). The HelloFresh sign-in happens in the browser, on `/authorize`, and only for that person:
+
+1. Choose the country.
+2. Either enter the HelloFresh email and password (not a Google, Apple, or Facebook password), or sign in on the HelloFresh website yourself — **Continue with Google** included — and paste the `apiV2Auth` value from that browser.
+3. The server keeps the access token and refresh token, checks `GET /gw/api/customers/me/subscriptions`, and discards the password and the raw paste.
+
+The same person connecting from Claude and from ChatGPT lands on the same account. Tokens live in `users/<userId>/tokens.json` (mode `0600`) next to the OAuth store. The password is never stored. When the refresh token is rejected, disconnect the connector and connect it again. There is no shared owner secret and no static bearer token.
+
+### Environment
+
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `PUBLIC_BASE_URL` | yes off localhost | Public origin, e.g. `https://hf-mcp.example.com` (no path) |
+| `HOST` | no | Bind address (default `127.0.0.1`; Docker uses `0.0.0.0`) |
+| `PORT` | no | Bind port (default `8080`) |
+| `MCP_HTTP` | no | `1` / `true` enables HTTP without `--http` |
+| `MCP_OAUTH_STORE_PATH` | no | OAuth clients and hashed tokens (file mode `0600`) |
+| `MCP_USERS_DIR` | no | Per-account token directory (default: `users` next to the OAuth store) |
+| `MCP_OAUTH_REDIRECT_HOSTS` | no | Comma-separated redirect hosts (default `claude.ai,claude.com,chatgpt.com`) |
+| `MCP_OAUTH_ALLOW_LOOPBACK` | no | Set `0` to refuse `localhost` / `127.0.0.1` redirect URIs |
+| `MCP_AUTHORIZE_MAX_ATTEMPTS` | no | Authorize attempts per IP and per email (default `10`) |
+| `MCP_AUTHORIZE_WINDOW_MS` | no | Rate-limit window in ms (default `900000`) |
+
+Endpoints: `POST /mcp`, `GET /healthz`, and OAuth (`/.well-known/oauth-protected-resource`, `/.well-known/oauth-authorization-server`, `/authorize`, `/token`, `/register`). Redirect URIs are allowlisted.
+
+**claude.ai:** Settings → Connectors → custom connector → `https://<your-host>/mcp`.  
+**ChatGPT:** Connectors → MCP connector with the same URL.
+
+### Docker
+
+The image is Node only. It does not include Playwright or a virtual display. Mount a volume so OAuth state and account tokens survive restarts:
+
+```bash
+docker build -t mcp-hellofresh .
+docker run --rm -p 8080:8080 \
+  -e PUBLIC_BASE_URL='https://hf-mcp.example.com' \
+  -v /var/lib/mcp-hellofresh:/data \
+  mcp-hellofresh
+```
+
+`/data/oauth-store.json` holds OAuth clients and hashed tokens. `/data/users` holds one HelloFresh token file per account.
+
+## Local stdio (Claude Desktop / Claude Code)
+
+One person, one process.
 
 ```json
 {
   "mcpServers": {
     "hellofresh": {
       "command": "npx",
-      "args": ["-y", "@striderlabs/mcp-hellofresh"]
+      "args": ["-y", "@striderlabs/mcp-hellofresh"],
+      "env": {
+        "HELLOFRESH_COUNTRY": "fr"
+      }
     }
   }
 }
 ```
 
-Google SSO users should omit `env`. After installing, run `npm run login` once (or call the `login` tool from Claude Desktop on a machine with a screen).
+Password accounts can set `HELLOFRESH_EMAIL` and `HELLOFRESH_PASSWORD`. Those are sent once to `POST /gw/login` and are not written to disk. If the refresh token later dies, the process may sign in again with those env vars.
 
-Config file locations:
-- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-- **Linux**: `~/.config/Claude/claude_desktop_config.json`
-
-## Usage with Claude Code
+Google, Apple, or Facebook accounts: on a machine with a display, run `npm run login` (or the `login` tool). Finish **Continue with Google** in the window. The command reads `apiV2Auth` and saves tokens to `HELLOFRESH_ACCOUNT_PATH` or `~/.config/mcp-hellofresh/account.json` (mode `0600`). Do not type a Google password into the chat, the terminal, or an MCP prompt.
 
 ```bash
 claude mcp add hellofresh -- npx -y @striderlabs/mcp-hellofresh
 ```
 
-Then run `npm run login` once with a display.
+## Example prompts
 
-## Example Prompts
+- "Am I connected to HelloFresh, and in which country?"
+- "What meals are available this week?"
+- "Select the chicken tacos for week 2026-W44"
+- "Skip my delivery for week 2026-W45"
+- "Move that delivery to next Thursday if HelloFresh offers it"
+- "How many meals per week am I subscribed to? Change it to 3"
 
-Once connected and logged in, you can ask Claude:
+## Tool reference
 
-- "Am I logged into HelloFresh?"
-- "What meals are available this week on HelloFresh?"
-- "Show me the recipe details and nutrition for the teriyaki salmon"
-- "Select the chicken tacos and mushroom pasta for next week's delivery"
-- "Skip my HelloFresh delivery for week 2024-W05"
-- "Change my delivery date to Friday January 12th"
-- "Update my preferences to vegetarian and avoid nuts"
-- "How many meals per week am I subscribed to? Can you change it to 3?"
-- "Show me my last 5 HelloFresh orders"
-- "I just made the lemon herb chicken — rate it 4 stars"
+`auth_status` takes no arguments. It returns `email`, `country`, `accessTokenValid`, `savedAt`, and `reconnectRequired`.
 
-## Tool Reference
+`login` takes no arguments and never accepts a password. Over HTTP it tells you to disconnect and reconnect the connector.
 
-### `auth_status`
-No parameters. Returns session path, `savedAt`, HelloFresh cookie **count**, and `valid` — never cookie values.
+`logout` deletes only the account linked to this connection.
 
-### `login`
-No parameters. Opens headed Chromium. Complete Google SSO in that window. Requires a display.
+`get_menu`: `week_offset` optional, 0–4.
 
-### `logout`
-No parameters. Deletes the session file and closes Chromium.
+`get_recipe_details`: `recipe_id` required.
 
-### `get_menu`
-```
-week_offset (optional, 0-4): Week offset from current week
-```
+`select_meals`: `week_id` required, `meals` required (`recipe_id`, optional `servings`).
 
-### `get_recipe_details`
-```
-recipe_id (required): The recipe identifier from get_menu
-```
+`skip_week`: `week_id` required.
 
-### `select_meals`
-```
-week_id (required): Week identifier, e.g. "2024-W01"
-meals (required): Array of { recipe_id, servings? } objects
-```
+`modify_delivery`: `week_id` and `new_date` (`YYYY-MM-DD`) required. The date must match a HelloFresh delivery option.
 
-### `skip_week`
-```
-week_id (required): Week identifier to skip
-```
+`update_preferences`: optional `vegetarian`, `family_friendly`, `dietary_preferences`, `allergens`, `cuisine_preferences`.
 
-### `get_delivery_schedule`
-No parameters required.
+`modify_subscription`: optional `meals_per_week` (2–5), `servings_per_meal` (2–4), `frequency` (`weekly` or `biweekly`). Frequency is not sent to HelloFresh; the result says it was left unchanged.
 
-### `modify_delivery`
-```
-week_id (required): Week identifier
-new_date (required): New date in YYYY-MM-DD format
-```
+`get_past_orders`: optional `limit` (1–50, default 10).
 
-### `get_preferences`
-No parameters required.
-
-### `update_preferences`
-```
-vegetarian (optional): boolean
-family_friendly (optional): boolean
-dietary_preferences (optional): string[]
-allergens (optional): string[]
-cuisine_preferences (optional): string[]
-```
-
-### `get_subscription`
-No parameters required.
-
-### `modify_subscription`
-```
-meals_per_week (optional, 2-5): Number of meals
-servings_per_meal (optional, 2-4): Number of servings
-frequency (optional): "weekly" | "biweekly"
-```
-
-### `get_past_orders`
-```
-limit (optional, 1-50): Max orders to return (default: 10)
-```
-
-### `rate_recipe`
-```
-recipe_id (required): Recipe to rate
-rating (required, 1-5): Star rating
-comment (optional): Written review up to 500 chars
-```
-
-## How It Works
-
-This connector uses [Playwright](https://playwright.dev) to drive the HelloFresh website. After you complete Google SSO once in a headed window, it reuses HelloFresh cookies from a local session file (headless) and probes that session before tools run. An expired session is not refreshed via Google; run `login` again. Password-account env vars, if set, may be used for a single automatic relogin.
-
-**Note**: Website changes may affect functionality. Use responsibly and in accordance with HelloFresh's terms of service.
+`rate_recipe`: kept so older clients still see the tool. It returns an error. Rate the recipe on the HelloFresh website.
 
 ## Security
 
-- Never store or automate Google credentials
-- Session file contains HelloFresh cookies only (Google cookies are stripped), mode `0600`, outside the git repo by default
-- HelloFresh email/password env vars are an optional fallback for non-SSO accounts only
+- Never store or automate a Google, Apple, or Facebook password. The authorize page has no field for one.
+- A HelloFresh password is used only for that `/gw/login` request. It is not stored, logged, or returned to the model.
+- Account files and the OAuth store are mode `0600`. OAuth access and refresh tokens are stored hashed.
+- A token issued before accounts were linked (no `userId`) is rejected.
+- `logout` removes one account. It does not sign you out of Google.
+- Redirect URIs are allowlisted. The public URL must be HTTPS except on localhost.
+- This does not bypass bot protection. If HelloFresh or Cloudflare blocks the call, the error says it is not a wrong password.
 
 ## License
 

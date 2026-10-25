@@ -12,6 +12,7 @@
     "build": "tsc",
     "dev": "tsc && node dist/index.js",
     "start": "node dist/index.js",
+    "start:http": "node dist/index.js --http",
     "login": "node dist/login-cli.js",
     "test": "tsc -p tsconfig.test.json && node --test dist-test/*.test.js",
     "pack": "npm pack"
@@ -27,8 +28,10 @@
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/server": "^2.4.0",
-    "playwright": "^1.64.1",
     "zod": "^4.6.7"
+  },
+  "optionalDependencies": {
+    "playwright": "^1.64.1"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

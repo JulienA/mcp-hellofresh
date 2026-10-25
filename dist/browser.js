@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.HelloFreshBrowser = void 0;
 const playwright_1 = require("playwright");
 const auth_js_1 = require("./auth.js");
+const login_mode_js_1 = require("./login-mode.js");
 const session_js_1 = require("./session.js");
 const DEFAULT_LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
 const LOGIN_POLL_MS = 500;
@@ -87,6 +88,9 @@ class HelloFreshBrowser {
      * Continue with Google. Requires a display. Never collects Google secrets.
      */
     async interactiveLogin() {
+        (0, login_mode_js_1.assertInteractiveLoginAllowed)({
+            hasInjectedHeadedLauncher: Boolean(this.options.launchHeaded),
+        });
         return this.mutex.runExclusive(async () => {
             try {
                 return await this.interactiveLoginUnlocked();
