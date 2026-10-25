@@ -16,6 +16,7 @@ const promises_1 = require("node:fs/promises");
 const node_os_1 = require("node:os");
 const node_path_1 = require("node:path");
 const countries_js_1 = require("./countries.js");
+const secret_box_js_1 = require("./secret-box.js");
 const security_js_1 = require("./security.js");
 exports.ACCOUNT_ENV_VAR = "HELLOFRESH_ACCOUNT_PATH";
 exports.USERS_DIR_ENV_VAR = "MCP_USERS_DIR";
@@ -76,23 +77,18 @@ class AccountStore {
 }
 exports.AccountStore = AccountStore;
 async function readStoredAccount(path) {
-    try {
-        const parsed = JSON.parse(await (0, promises_1.readFile)(path, "utf8"));
-        if (!parsed || typeof parsed !== "object" || typeof parsed.accessToken !== "string") {
-            return undefined;
-        }
-        if (typeof parsed.userId !== "string" || typeof parsed.email !== "string") {
-            return undefined;
-        }
-        return parsed;
+    const loaded = await (0, secret_box_js_1.readSecretText)(path, "account");
+    if (!loaded) {
+        return undefined;
     }
-    catch (error) {
-        const code = error.code;
-        if (code === "ENOENT") {
-            return undefined;
-        }
-        throw error;
+    const parsed = JSON.parse(loaded.text);
+    if (!parsed || typeof parsed !== "object" || typeof parsed.accessToken !== "string") {
+        return undefined;
     }
+    if (typeof parsed.userId !== "string" || typeof parsed.email !== "string") {
+        return undefined;
+    }
+    return parsed;
 }
 async function writeStoredAccount(path, account) {
     const payload = {
@@ -108,13 +104,7 @@ async function writeStoredAccount(path, account) {
         tokenType: account.tokenType,
         savedAt: account.savedAt,
     };
-    const dir = (0, node_path_1.dirname)(path);
-    await (0, promises_1.mkdir)(dir, { recursive: true, mode: 0o700 });
-    const tmp = `${path}.tmp`;
-    await (0, promises_1.writeFile)(tmp, JSON.stringify(payload, null, 2), { mode: 0o600 });
-    await (0, promises_1.chmod)(tmp, 0o600);
-    await (0, promises_1.rename)(tmp, path);
-    await (0, promises_1.chmod)(path, 0o600);
+    await (0, secret_box_js_1.writeSecretText)(path, JSON.stringify(payload), "account");
 }
 function decodeJwtClaims(token) {
     const parts = token.split(".");

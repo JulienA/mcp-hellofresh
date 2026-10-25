@@ -1,10 +1,11 @@
 # One HTTP process, many HelloFresh accounts.
 # PUBLIC_BASE_URL is the HTTPS origin clients call, with no path.
 #
-#   PUBLIC_BASE_URL=https://hf-mcp.example.com docker compose up -d --build
+#   PUBLIC_BASE_URL=https://hf-mcp.example.com MCP_DATA_KEY=... docker compose up -d --build
 #
-# Or put that line in a .env file next to this file. Compose reads it for
-# interpolation and refuses to start when the variable is missing.
+# Or put those lines in a .env file next to this file. Compose reads them for
+# interpolation and refuses to start when either variable is missing.
+# MCP_DATA_KEY is 32 bytes (base64url or hex). It is not stored in the image.
 
 services:
   mcp-hellofresh:
@@ -14,6 +15,7 @@ services:
       - "8080:8080"
     environment:
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?Set PUBLIC_BASE_URL to the public HTTPS origin, with no path}
+      MCP_DATA_KEY: ${MCP_DATA_KEY:?Set MCP_DATA_KEY to 32 bytes encoded as base64url or hex}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
       - hellofresh-data:/data

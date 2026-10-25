@@ -52,7 +52,7 @@ npx mcp-hellofresh --http
 
 Connector URL: `https://<your-host>/mcp`
 
-One process stores many HelloFresh accounts. The account id is the SHA-256 of the country code, a newline, and the trimmed lowercased email. The same country and email from Claude and from ChatGPT share `users/<userId>/tokens.json` (mode `0600`) in the users directory. Another country is another account.
+One process stores many HelloFresh accounts. The account id is the SHA-256 of the country code, a newline, and the trimmed lowercased email. The same country and email from Claude and from ChatGPT share `users/<userId>/tokens.json` in the users directory. That file is mode `0600` and encrypted with `MCP_DATA_KEY`. Another country is another account.
 
 HelloFresh does not offer third-party OAuth. Claude and ChatGPT complete OAuth against this server (dynamic client registration, PKCE, refresh). The HelloFresh sign-in happens in the browser, on `/authorize`, and only for that person:
 
@@ -70,17 +70,20 @@ MCP access tokens last one hour (`ACCESS_TOKEN_TTL_SEC`). Refresh tokens last 30
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
+| `MCP_DATA_KEY` | yes | 32-byte AES-256-GCM key, as base64, base64url, or hex. Encrypts account tokens, the OAuth store, and the local session file. Only this key can read them. |
 | `PUBLIC_BASE_URL` | yes off localhost | Public HTTPS origin, e.g. `https://hf-mcp.example.com` (no path) |
 | `HOST` | no | Bind address (default `127.0.0.1`; Docker uses `0.0.0.0`) |
 | `PORT` | no | Bind port (default `8080`) |
 | `MCP_HTTP` | no | `1`, `true`, or `yes` enables HTTP without `--http` |
-| `MCP_OAUTH_STORE_PATH` | no | OAuth clients and hashed tokens (file mode `0600`). Default `~/.config/mcp-hellofresh/oauth-store.json`, or `%APPDATA%\mcp-hellofresh\oauth-store.json` on Windows. `XDG_CONFIG_HOME` is honored. |
+| `MCP_OAUTH_STORE_PATH` | no | OAuth clients and hashed tokens (file mode `0600`, encrypted). Default `~/.config/mcp-hellofresh/oauth-store.json`, or `%APPDATA%\mcp-hellofresh\oauth-store.json` on Windows. `XDG_CONFIG_HOME` is honored. |
 | `MCP_USERS_DIR` | no | Per-account token directory. Default is the `users` directory next to the OAuth store. |
 | `MCP_OAUTH_REDIRECT_HOSTS` | no | Comma-separated redirect hosts (default `claude.ai,claude.com,chatgpt.com`) |
 | `MCP_OAUTH_ALLOW_LOOPBACK` | no | Set `0` to refuse loopback redirect URIs (`localhost`, `127.0.0.1`, `::1`) |
 | `MCP_AUTHORIZE_MAX_ATTEMPTS` | no | Authorize attempts in the window (default `10`) |
 | `MCP_AUTHORIZE_WINDOW_MS` | no | Rate-limit window in ms (default `900000`, 15 minutes) |
 | `LOG_LEVEL` | no | `debug`, `info` (default), `warn`, or `error`. JSON lines on stderr. `/healthz` is `debug`. |
+
+Generate a key with `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"`. Keep it in the environment only, not in the image and not in git. A short passphrase is rejected. An existing plaintext file is still read once when the key is set, then rewritten encrypted on the next save. Without the key, the process refuses to start and those files cannot be read.
 
 The default is 10 attempts per 900000 ms (15 minutes). The key is the first `X-Forwarded-For` entry, otherwise `cf-connecting-ip`, otherwise one shared bucket named `local`. Password sign-in is also counted per email. A pasted `apiV2Auth` is counted only on that header key. The TCP peer address is not the key.
 
@@ -108,21 +111,22 @@ The image is Node only. It does not include Playwright or a virtual display. Mou
 docker build -t mcp-hellofresh .
 docker run --rm -p 8080:8080 \
   -e PUBLIC_BASE_URL='https://hf-mcp.example.com' \
+  -e MCP_DATA_KEY='paste-32-byte-base64url-key' \
   -v /var/lib/mcp-hellofresh:/data \
   mcp-hellofresh
 ```
 
-`/data/oauth-store.json` holds OAuth clients and hashed tokens. `/data/users/<userId>/tokens.json` holds one HelloFresh account.
+`/data/oauth-store.json` holds OAuth clients and hashed tokens. `/data/users/<userId>/tokens.json` holds one HelloFresh account. Both are encrypted with `MCP_DATA_KEY`.
 
-`docker-compose.yml` runs the same image. Compose refuses to start when `PUBLIC_BASE_URL` is missing. The same variable can live in a `.env` file next to `docker-compose.yml`. The `hellofresh-data` volume is mounted at `/data`.
+`docker-compose.yml` runs the same image. Compose refuses to start when `PUBLIC_BASE_URL` or `MCP_DATA_KEY` is missing. The same variables can live in a `.env` file next to `docker-compose.yml`. The `hellofresh-data` volume is mounted at `/data`. The key is not written into the image.
 
 ```bash
-PUBLIC_BASE_URL='https://hf-mcp.example.com' docker compose up -d --build
+PUBLIC_BASE_URL='https://hf-mcp.example.com' MCP_DATA_KEY='paste-32-byte-base64url-key' docker compose up -d --build
 ```
 
 ## Local stdio (Claude Desktop / Claude Code)
 
-One person, one process, one file. The file is `HELLOFRESH_ACCOUNT_PATH`, or `~/.config/mcp-hellofresh/account.json` (Windows: `%APPDATA%\mcp-hellofresh\account.json`). `XDG_CONFIG_HOME` is honored. This is not the HTTP `users/` directory.
+One person, one process, one file. The file is `HELLOFRESH_ACCOUNT_PATH`, or `~/.config/mcp-hellofresh/account.json` (Windows: `%APPDATA%\mcp-hellofresh\account.json`). `XDG_CONFIG_HOME` is honored. This is not the HTTP `users/` directory. `MCP_DATA_KEY` encrypts that file, and the process will not start without it.
 
 ```json
 {
@@ -131,7 +135,8 @@ One person, one process, one file. The file is `HELLOFRESH_ACCOUNT_PATH`, or `~/
       "command": "npx",
       "args": ["-y", "@striderlabs/mcp-hellofresh"],
       "env": {
-        "HELLOFRESH_COUNTRY": "fr"
+        "HELLOFRESH_COUNTRY": "fr",
+        "MCP_DATA_KEY": "paste-32-byte-base64url-key"
       }
     }
   }
@@ -140,7 +145,7 @@ One person, one process, one file. The file is `HELLOFRESH_ACCOUNT_PATH`, or `~/
 
 Password accounts can set `HELLOFRESH_EMAIL` and `HELLOFRESH_PASSWORD`. Those are sent once to `POST /gw/login` and are not written to disk. If the refresh token later dies, the process may sign in again with those env vars.
 
-Google, Apple, or Facebook accounts: on a machine with a display, run `npm run login` (or the `login` tool). Finish **Continue with Google** in the window. The command reads `apiV2Auth` and saves tokens to that file (mode `0600`). Do not type a Google password into the chat, the terminal, or an MCP prompt.
+Google, Apple, or Facebook accounts: on a machine with a display, run `npm run login` (or the `login` tool). Finish **Continue with Google** in the window. The command reads `apiV2Auth` and saves tokens to that file (mode `0600`, encrypted with `MCP_DATA_KEY`). Do not type a Google password into the chat, the terminal, or an MCP prompt.
 
 ```bash
 claude mcp add hellofresh -- npx -y @striderlabs/mcp-hellofresh
@@ -187,7 +192,8 @@ claude mcp add hellofresh -- npx -y @striderlabs/mcp-hellofresh
 
 - Never store or automate a Google, Apple, or Facebook password. The authorize page has no field for one.
 - A HelloFresh password is used only for that `/gw/login` request. It is not stored, logged, or returned to the model.
-- Account files and the OAuth store are mode `0600`. OAuth access and refresh tokens are stored hashed.
+- Account files, the OAuth store, and the local session file are encrypted with AES-256-GCM. The key lives only in `MCP_DATA_KEY`. Files stay mode `0600`. OAuth access and refresh tokens are also stored hashed inside that encrypted store.
+- A previous plaintext file is read once when the key is set, and rewritten encrypted on the next save. The key is never logged.
 - Every MCP access token carries a HelloFresh account id. A token without one is rejected.
 - `/authorize` stores the visitor's HelloFresh tokens on this server.
 - Authorize attempts use the forwarding headers above, plus the email on password sign-in.

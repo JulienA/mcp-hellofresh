@@ -18,7 +18,7 @@ const LEVELS = {
     warn: 30,
     error: 40,
 };
-const SENSITIVE_KEY = /password|passwd|secret|token|authorization|cookie|email|username|verifier|api[_-]?v2[_-]?auth/i;
+const SENSITIVE_KEY = /password|passwd|secret|token|authorization|cookie|email|username|verifier|api[_-]?v2[_-]?auth|data[_-]?key/i;
 let minLevel = parseLogLevel(process.env.LOG_LEVEL);
 let sink = writeStderr;
 function writeStderr(line) {
@@ -99,7 +99,8 @@ function looksLikeSecret(value) {
     if (/^(mcp_|mcr_)/.test(trimmed)) {
         return true;
     }
-    if (trimmed.split(".").length === 3 && trimmed.length > 40) {
+    const jwtParts = trimmed.split(".");
+    if (jwtParts.length === 3 && jwtParts.every((part) => part.length > 0) && trimmed.length > 40) {
         return true;
     }
     if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {

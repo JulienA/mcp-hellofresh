@@ -1,6 +1,5 @@
-import { mkdir, readFile, rename, chmod, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
 import { AsyncMutex } from "./auth.js";
+import { readSecretText, writeSecretText } from "./secret-box.js";
 import { sha256Hex } from "./security.js";
 
 export const OAUTH_STORE_ENV_VAR = "MCP_OAUTH_STORE_PATH";
@@ -149,20 +148,16 @@ export class OAuthStore {
     if (this.loaded) {
       return this.loaded;
     }
-    try {
-      const raw = await readFile(this.filePath, "utf8");
-      const parsed = JSON.parse(raw) as StoreFile;
-      this.loaded = {
-        clients: parsed.clients && typeof parsed.clients === "object" ? parsed.clients : {},
-        tokens: parsed.tokens && typeof parsed.tokens === "object" ? parsed.tokens : {},
-      };
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "ENOENT") {
-        throw error;
-      }
+    const loaded = await readSecretText(this.filePath, "oauth");
+    if (!loaded) {
       this.loaded = { clients: {}, tokens: {} };
+      return this.loaded;
     }
+    const parsed = JSON.parse(loaded.text) as StoreFile;
+    this.loaded = {
+      clients: parsed.clients && typeof parsed.clients === "object" ? parsed.clients : {},
+      tokens: parsed.tokens && typeof parsed.tokens === "object" ? parsed.tokens : {},
+    };
     return this.loaded;
   }
 
@@ -175,14 +170,7 @@ export class OAuthStore {
   }
 
   private async saveUnlocked(data: StoreFile): Promise<void> {
-    const dir = dirname(this.filePath);
-    await mkdir(dir, { recursive: true, mode: 0o700 });
-    const tmp = `${this.filePath}.tmp`;
-    const json = JSON.stringify(data, null, 2);
-    await writeFile(tmp, json, { mode: 0o600 });
-    await chmod(tmp, 0o600);
-    await rename(tmp, this.filePath);
-    await chmod(this.filePath, 0o600);
+    await writeSecretText(this.filePath, JSON.stringify(data), "oauth");
     this.loaded = data;
   }
 }

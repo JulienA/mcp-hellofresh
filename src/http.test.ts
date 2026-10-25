@@ -4,13 +4,15 @@ import { mkdtemp, readFile, readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
-import { userIdFor } from "./accounts.js";
+import { readStoredAccount, userIdFor } from "./accounts.js";
 import { ACCESS_TOKEN_TTL_SEC, type HttpRuntimeConfig } from "./config.js";
 import { clearRecipeDetailsCache, type FetchLike } from "./hellofresh-api.js";
 import { startHttpServer, type HttpServerHandle } from "./http.js";
 import { captureLogLines, setLogLevel, setLogSink } from "./log.js";
 import { OAuthStore } from "./oauth-store.js";
-import { sha256Hex } from "./security.js";
+import { DATA_KEY_ENV } from "./secret-box.js";
+
+process.env[DATA_KEY_ENV] = Buffer.alloc(32, 0x11).toString("base64url");
 
 setLogSink(() => {});
 
@@ -389,7 +391,8 @@ describe("OAuth DCR + PKCE + refresh", () => {
       const rawStore = await readFile(storePath, "utf8");
       assert.equal(rawStore.includes(tokens.accessToken), false);
       assert.equal(rawStore.includes(tokens.refreshToken), false);
-      assert.ok(rawStore.includes(sha256Hex(tokens.accessToken)));
+      assert.equal(rawStore.includes("alice@example.com"), false);
+      assert.match(rawStore, /aes-256-gcm/);
       assert.equal((await stat(storePath)).mode & 0o777, 0o600);
       assert.equal(rawStore.includes(CORRECT_PASSWORD), false);
 
@@ -586,7 +589,13 @@ describe("OAuth DCR + PKCE + refresh", () => {
       assert.equal((await stat(file)).mode & 0o777, 0o600);
       assert.equal(raw.includes("discard-me-paste-blob"), false);
       assert.equal(raw.includes(CORRECT_PASSWORD), false);
-      assert.match(raw, /paste@example.com/);
+      assert.equal(raw.includes("paste@example.com"), false);
+      assert.equal(raw.includes(access), false);
+      assert.equal(raw.includes("refresh-paste"), false);
+      const stored = await readStoredAccount(file);
+      assert.equal(stored?.email, "paste@example.com");
+      assert.ok(stored?.accessToken);
+      assert.equal(raw.includes(stored.accessToken), false);
     });
   });
 });
@@ -659,12 +668,19 @@ describe("/mcp authentication", () => {
       assert.equal(bobId, userIdFor("fr", "bob@example.com"));
       assert.notEqual(aliceId, bobId);
 
-      const aliceFile = await readFile(join(handle.config.usersDir, aliceId, "tokens.json"), "utf8");
-      const bobFile = await readFile(join(handle.config.usersDir, bobId, "tokens.json"), "utf8");
-      assert.match(aliceFile, /hf-access-alice@example.com/);
-      assert.match(bobFile, /hf-access-bob@example.com/);
+      const alicePath = join(handle.config.usersDir, aliceId, "tokens.json");
+      const bobPath = join(handle.config.usersDir, bobId, "tokens.json");
+      const aliceFile = await readFile(alicePath, "utf8");
+      const bobFile = await readFile(bobPath, "utf8");
+      assert.equal(aliceFile.includes("hf-access-alice@example.com"), false);
+      assert.equal(aliceFile.includes("alice@example.com"), false);
+      assert.equal(bobFile.includes("hf-access-bob@example.com"), false);
+      assert.equal(bobFile.includes("bob@example.com"), false);
       assert.equal(aliceFile.includes(CORRECT_PASSWORD), false);
-      assert.equal(bobFile.includes("hf-access-bob@example.com") && aliceFile.includes("hf-access-bob"), false);
+      const aliceAccount = await readStoredAccount(alicePath);
+      const bobAccount = await readStoredAccount(bobPath);
+      assert.equal(aliceAccount?.accessToken, "hf-access-alice@example.com");
+      assert.equal(bobAccount?.accessToken, "hf-access-bob@example.com");
 
       const aliceStatus = await toolText(handle, alice.accessToken, "auth_status", {});
       const bobStatus = await toolText(handle, bob.accessToken, "auth_status", {});

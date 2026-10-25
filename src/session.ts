@@ -1,6 +1,7 @@
-import { mkdir, readFile, rename, rm, chmod, writeFile } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
+import { readSecretText, writeSecretText } from "./secret-box.js";
 
 export const SESSION_ENV_VAR = "HELLOFRESH_SESSION_PATH";
 export const DEFAULT_SESSION_FILENAME = "session.json";
@@ -137,27 +138,22 @@ export function helloFreshCookiesAreValid(
 export async function loadPersistedSession(
   path: string
 ): Promise<PersistedSession | undefined> {
-  try {
-    const raw = await readFile(path, "utf8");
-    const parsed = JSON.parse(raw) as PersistedSession;
-    if (!parsed || typeof parsed !== "object" || !parsed.storageState) {
-      return undefined;
-    }
-    const storageState = filterHelloFreshStorageState(parsed.storageState);
-    if (storageState.cookies.length === 0 && storageState.origins.length === 0) {
-      return undefined;
-    }
-    return {
-      savedAt: typeof parsed.savedAt === "string" ? parsed.savedAt : new Date(0).toISOString(),
-      storageState,
-    };
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") {
-      return undefined;
-    }
-    throw error;
+  const loaded = await readSecretText(path, "session");
+  if (!loaded) {
+    return undefined;
   }
+  const parsed = JSON.parse(loaded.text) as PersistedSession;
+  if (!parsed || typeof parsed !== "object" || !parsed.storageState) {
+    return undefined;
+  }
+  const storageState = filterHelloFreshStorageState(parsed.storageState);
+  if (storageState.cookies.length === 0 && storageState.origins.length === 0) {
+    return undefined;
+  }
+  return {
+    savedAt: typeof parsed.savedAt === "string" ? parsed.savedAt : new Date(0).toISOString(),
+    storageState,
+  };
 }
 
 export async function savePersistedSession(
@@ -170,14 +166,7 @@ export async function savePersistedSession(
     savedAt: savedAt.toISOString(),
     storageState: filtered,
   };
-  const dir = dirname(path);
-  await mkdir(dir, { recursive: true, mode: 0o700 });
-  const tmp = `${path}.tmp`;
-  const json = JSON.stringify(payload, null, 2);
-  await writeFile(tmp, json, { mode: 0o600 });
-  await chmod(tmp, 0o600);
-  await rename(tmp, path);
-  await chmod(path, 0o600);
+  await writeSecretText(path, JSON.stringify(payload), "session");
   return payload;
 }
 

@@ -7,6 +7,7 @@ const hellofresh_session_js_1 = require("./hellofresh-session.js");
 const log_js_1 = require("./log.js");
 const login_mode_js_1 = require("./login-mode.js");
 const mcp_server_js_1 = require("./mcp-server.js");
+const secret_box_js_1 = require("./secret-box.js");
 function printHttpHelp() {
     console.error(`Usage:
   mcp-hellofresh              # stdio (default, for Claude Desktop / Claude Code)
@@ -17,7 +18,8 @@ HTTP flags and environment:
   --host <host>               Bind address (HOST, default 127.0.0.1)
   --port <port>               Bind port (PORT, default 8080)
   PUBLIC_BASE_URL             Public HTTPS origin (required off localhost)
-  MCP_OAUTH_STORE_PATH        Persisted OAuth clients and tokens (mode 0600)
+  MCP_DATA_KEY                32-byte key (base64, base64url, or hex) that encrypts data on disk
+  MCP_OAUTH_STORE_PATH        Persisted OAuth clients and tokens (mode 0600, encrypted)
   MCP_USERS_DIR               Directory of per-account HelloFresh tokens
   MCP_OAUTH_REDIRECT_HOSTS    Comma-separated redirect hosts (default: claude.ai, claude.com, chatgpt.com)
   LOG_LEVEL                   debug | info | warn | error (JSON lines on stderr, default info)
@@ -39,6 +41,15 @@ async function main() {
     const argv = process.argv.slice(2);
     if (argv.includes("--help") || argv.includes("-h")) {
         printHttpHelp();
+        return;
+    }
+    try {
+        (0, secret_box_js_1.loadDataKey)();
+    }
+    catch (error) {
+        const message = error instanceof secret_box_js_1.SecretBoxError ? error.message : String(error);
+        log_js_1.log.error("data.key", { err: message });
+        process.exitCode = 1;
         return;
     }
     if ((0, login_mode_js_1.isHttpMode)(argv)) {

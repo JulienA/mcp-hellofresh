@@ -1,16 +1,20 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import {
   accountFilePath,
   parseApiV2Auth,
+  readStoredAccount,
   resolveUsersDir,
   userIdFor,
   writeStoredAccount,
   type StoredAccount,
 } from "./accounts.js";
+import { DATA_KEY_ENV } from "./secret-box.js";
+
+process.env[DATA_KEY_ENV] = Buffer.alloc(32, 0x11).toString("base64url");
 
 function account(email: string): StoredAccount {
   return {
@@ -47,7 +51,43 @@ describe("account files", () => {
     assert.equal((await stat(path)).mode & 0o777, 0o600);
     assert.equal(raw.includes("must-not-land"), false);
     assert.equal(raw.includes("password"), false);
-    assert.match(raw, /access-token/);
+    assert.equal(raw.includes("access-token"), false);
+    assert.equal(raw.includes("ada@example.com"), false);
+    assert.match(raw, /aes-256-gcm/);
+    const loaded = await readStoredAccount(path);
+    assert.equal(loaded?.accessToken, "access-token");
+    assert.equal(loaded?.refreshToken, "refresh-token");
+    assert.equal(loaded?.email, "ada@example.com");
+  });
+
+  it("reads a legacy plaintext account and seals it on the next write", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "hf-users-"));
+    const path = accountFilePath(dir, userIdFor("fr", "ada@example.com"));
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, JSON.stringify(account("ada@example.com")));
+    const loaded = await readStoredAccount(path);
+    assert.equal(loaded?.accessToken, "access-token");
+    assert.match(await readFile(path, "utf8"), /access-token/);
+    await writeStoredAccount(path, loaded ?? account("ada@example.com"));
+    const sealed = await readFile(path, "utf8");
+    assert.equal(sealed.includes("access-token"), false);
+    assert.equal(sealed.includes("ada@example.com"), false);
+    assert.equal((await readStoredAccount(path))?.refreshToken, "refresh-token");
+  });
+
+  it("does not read a legacy account when MCP_DATA_KEY is missing", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "hf-users-"));
+    const path = accountFilePath(dir, userIdFor("fr", "ada@example.com"));
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, JSON.stringify(account("ada@example.com")));
+    const previous = process.env[DATA_KEY_ENV];
+    delete process.env[DATA_KEY_ENV];
+    try {
+      await assert.rejects(() => readStoredAccount(path), /MCP_DATA_KEY is required/);
+      assert.match(await readFile(path, "utf8"), /access-token/);
+    } finally {
+      process.env[DATA_KEY_ENV] = previous;
+    }
   });
 
   it("refuses a user id that is not a hash", () => {
