@@ -10,18 +10,16 @@ import {
   type AuthInfo,
   type AuthMetadataOptions,
 } from "@modelcontextprotocol/server";
-import { HelloFreshBrowser } from "./browser.js";
+import { AccountStore } from "./accounts.js";
+import { createAccountLinker, type AccountLinker } from "./account-linker.js";
 import type { HttpRuntimeConfig } from "./config.js";
+import type { FetchLike } from "./hellofresh-api.js";
+import { AccountClients } from "./hellofresh-session.js";
 import { HelloFreshMCPServer } from "./mcp-server.js";
 import { sendWebResponse, toWebRequest } from "./node-http.js";
-import {
-  OwnerAuthorizationServer,
-  buildAuthorizationServerMetadata,
-  createStaticBearerAuthInfo,
-  parseBearerToken,
-  timingSafeEqualString,
-} from "./oauth.js";
+import { OwnerAuthorizationServer, buildAuthorizationServerMetadata } from "./oauth.js";
 import { OAuthStore } from "./oauth-store.js";
+import { currentHelloFreshUserId, helloFreshUserContext } from "./request-context.js";
 
 export interface HttpServerHandle {
   server: http.Server;
@@ -30,9 +28,16 @@ export interface HttpServerHandle {
   close: () => Promise<void>;
 }
 
+export interface HttpServerOptions {
+  /** Injected in tests. Production uses the platform fetch. */
+  fetchImpl?: FetchLike;
+  /** Injected in tests. Production links accounts through /gw. */
+  linker?: AccountLinker;
+}
+
 export async function startHttpServer(
   config: HttpRuntimeConfig,
-  hellofresh: HelloFreshBrowser = new HelloFreshBrowser()
+  options: HttpServerOptions = {}
 ): Promise<HttpServerHandle> {
   const server = http.createServer();
   await listen(server, config.host, config.port);
@@ -50,10 +55,22 @@ export async function startHttpServer(
     resourceUrl: new URL("/mcp", origin.origin),
   };
 
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const accounts = new AccountStore(resolved.usersDir);
+  const linker = options.linker ?? createAccountLinker(accounts, fetchImpl);
+  const clients = new AccountClients(accounts, fetchImpl);
   const store = new OAuthStore(resolved.oauthStorePath);
-  const oauth = new OwnerAuthorizationServer(resolved, store);
+  const oauth = new OwnerAuthorizationServer(resolved, store, linker);
   const mcpHandler = createMcpHandler(
-    () => new HelloFreshMCPServer(hellofresh, { allowInteractiveLogin: false }).server,
+    (ctx) => {
+      const userId = userIdFromAuth(ctx.authInfo) ?? currentHelloFreshUserId();
+      if (!userId) {
+        throw new Error("This access token is not linked to a HelloFresh account.");
+      }
+      return new HelloFreshMCPServer(clients.sessionFor(userId), {
+        allowInteractiveLogin: false,
+      }).server;
+    },
     { legacy: "stateless" }
   );
 
@@ -117,11 +134,18 @@ export async function startHttpServer(
     }
 
     if (path === "/mcp") {
-      const auth = await authenticate(request, resolved, oauthGate);
+      const auth = await oauthGate(request);
       if (auth instanceof Response) {
         return auth;
       }
-      return mcpHandler.fetch(request, { authInfo: auth });
+      const userId = userIdFromAuth(auth);
+      if (!userId) {
+        return new Response("Unauthorized", {
+          status: 401,
+          headers: { "WWW-Authenticate": "Bearer" },
+        });
+      }
+      return helloFreshUserContext.run(userId, () => mcpHandler.fetch(request, { authInfo: auth }));
     }
 
     return new Response("Not Found", { status: 404 });
@@ -152,7 +176,6 @@ export async function startHttpServer(
       server.close((err) => (err ? reject(err) : resolve()));
     });
     await mcpHandler.close();
-    await hellofresh.close();
   };
 
   return {
@@ -163,18 +186,9 @@ export async function startHttpServer(
   };
 }
 
-async function authenticate(
-  request: Request,
-  config: HttpRuntimeConfig,
-  oauthGate: (request: Request) => Promise<AuthInfo | Response>
-): Promise<AuthInfo | Response> {
-  if (config.bearerToken) {
-    const presented = parseBearerToken(request.headers.get("authorization"));
-    if (presented && timingSafeEqualString(presented, config.bearerToken)) {
-      return createStaticBearerAuthInfo(presented, config.resourceUrl);
-    }
-  }
-  return oauthGate(request);
+function userIdFromAuth(auth: AuthInfo | undefined): string | undefined {
+  const userId = auth?.extra?.userId;
+  return typeof userId === "string" && userId ? userId : undefined;
 }
 
 function extraMetadataResponse(

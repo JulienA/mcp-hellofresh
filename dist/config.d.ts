@@ -11,9 +11,8 @@ export interface HttpRuntimeConfig {
     publicBaseUrl: URL;
     issuer: URL;
     resourceUrl: URL;
-    ownerPasswordSha256Hex: string;
-    bearerToken?: string;
     oauthStorePath: string;
+    usersDir: string;
     redirectHosts: string[];
     allowLoopbackRedirects: boolean;
     authorizeMaxAttempts: number;

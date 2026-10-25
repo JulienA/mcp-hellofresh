@@ -6,35 +6,26 @@ import {
   loadHttpRuntimeConfig,
   redirectHostnameAllowed,
 } from "./config.js";
-import { sha256Hex } from "./security.js";
 
 describe("loadHttpRuntimeConfig", () => {
-  it("refuses HTTP mode without an owner secret", () => {
-    assert.throws(
-      () => loadHttpRuntimeConfig({ HOST: "127.0.0.1", PORT: "8090" }, []),
-      (err: unknown) => {
-        assert.ok(err instanceof ConfigError);
-        assert.match(err.message, /MCP_OWNER_PASSWORD/);
-        assert.doesNotMatch(err.message, /GOOGLE_PASSWORD/);
-        return true;
-      }
-    );
-  });
-
-  it("accepts MCP_OWNER_PASSWORD_HASH and default redirect hosts", () => {
-    const digest = sha256Hex("owner-secret");
-    const config = loadHttpRuntimeConfig(
-      {
-        MCP_OWNER_PASSWORD_HASH: `sha256:${digest}`,
-        HOST: "127.0.0.1",
-        PORT: "8090",
-      },
-      []
-    );
-    assert.equal(config.ownerPasswordSha256Hex, digest);
+  it("starts without an owner secret or static bearer", () => {
+    const config = loadHttpRuntimeConfig({ HOST: "127.0.0.1", PORT: "8090" }, []);
+    assert.equal(config.host, "127.0.0.1");
+    assert.equal(config.port, 8090);
     assert.deepEqual(config.redirectHosts, DEFAULT_REDIRECT_HOSTS);
     assert.equal(config.resourceUrl.pathname, "/mcp");
     assert.equal(config.issuer.protocol, "http:");
+    assert.equal(config.usersDir.endsWith("/users") || config.usersDir.endsWith("\\users"), true);
+    assert.equal("ownerPasswordSha256Hex" in config, false);
+    assert.equal("bearerToken" in config, false);
+  });
+
+  it("honors MCP_USERS_DIR", () => {
+    const config = loadHttpRuntimeConfig(
+      { HOST: "127.0.0.1", PORT: "8090", MCP_USERS_DIR: "/var/lib/mcp-hellofresh/users" },
+      []
+    );
+    assert.equal(config.usersDir, "/var/lib/mcp-hellofresh/users");
   });
 
   it("requires HTTPS PUBLIC_BASE_URL off localhost", () => {
@@ -42,22 +33,21 @@ describe("loadHttpRuntimeConfig", () => {
       () =>
         loadHttpRuntimeConfig(
           {
-            MCP_OWNER_PASSWORD: "secret",
             PUBLIC_BASE_URL: "http://example.com",
           },
           []
         ),
-      /HTTPS/
+      (err: unknown) => {
+        assert.ok(err instanceof ConfigError);
+        assert.match(err.message, /HTTPS/);
+        return true;
+      }
     );
   });
 
   it("requires PUBLIC_BASE_URL when binding 0.0.0.0", () => {
     assert.throws(
-      () =>
-        loadHttpRuntimeConfig(
-          { MCP_OWNER_PASSWORD: "secret", HOST: "0.0.0.0" },
-          []
-        ),
+      () => loadHttpRuntimeConfig({ HOST: "0.0.0.0" }, []),
       /PUBLIC_BASE_URL/
     );
   });

@@ -62,6 +62,16 @@ describe("toAuthError / formatAuthToolError", () => {
     const result = formatAuthToolError(new Error("zod fail"));
     assert.equal(result.content[0].text, "Error: zod fail");
   });
+
+  it("serializes HelloFresh API errors without dropping the code", () => {
+    const error = new Error("Reconnect the connector.");
+    error.name = "HelloFreshApiError";
+    (error as Error & { code: string }).code = "reconnect_required";
+    const result = formatAuthToolError(error);
+    const payload = JSON.parse(result.content[0].text) as { error: string; message: string };
+    assert.equal(payload.error, "reconnect_required");
+    assert.match(payload.message, /Reconnect the connector/);
+  });
 });
 
 describe("readOptionalPasswordCredentials", () => {

@@ -1,12 +1,13 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.HEADLESS_LOGIN_MESSAGE = void 0;
+exports.HEADLESS_LOGIN_MESSAGE = exports.HTTP_LOGIN_MESSAGE = void 0;
 exports.isHttpMode = isHttpMode;
 exports.isHeadlessEnvironment = isHeadlessEnvironment;
 exports.interactiveLoginBlockedReason = interactiveLoginBlockedReason;
 exports.assertInteractiveLoginAllowed = assertInteractiveLoginAllowed;
 const auth_js_1 = require("./auth.js");
-exports.HEADLESS_LOGIN_MESSAGE = "Interactive Google SSO is not available in HTTP/headless mode. On a machine with a screen, run `npm run login`, then copy session.json onto this server and set HELLOFRESH_SESSION_PATH. Never store or automate Google credentials.";
+exports.HTTP_LOGIN_MESSAGE = "Disconnect this connector in Claude or ChatGPT, then connect it again. Sign in on the authorize page with your HelloFresh password, or paste apiV2Auth after you sign in on the HelloFresh website (Continue with Google included). Do not send a password to this tool.";
+exports.HEADLESS_LOGIN_MESSAGE = "Interactive sign-in needs a display. Run `npm run login` and finish Continue with Google in that window. A remote HTTP connector is signed in on its authorize page instead. Do not send a Google password.";
 function isHttpMode(argv = process.argv.slice(2), env = process.env) {
     if (argv.includes("--http")) {
         return true;
@@ -29,7 +30,7 @@ function isHeadlessEnvironment(env = process.env) {
 }
 function interactiveLoginBlockedReason(options = {}) {
     if (options.httpMode) {
-        return exports.HEADLESS_LOGIN_MESSAGE;
+        return exports.HTTP_LOGIN_MESSAGE;
     }
     if (options.hasInjectedHeadedLauncher) {
         return undefined;
@@ -39,7 +40,7 @@ function interactiveLoginBlockedReason(options = {}) {
     }
     return undefined;
 }
-function assertInteractiveLoginAllowed(options) {
+function assertInteractiveLoginAllowed(options = {}) {
     const reason = interactiveLoginBlockedReason(options);
     if (reason) {
         throw auth_js_1.AuthError.loginFailed(reason);

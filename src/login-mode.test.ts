@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import { AuthError } from "./auth.js";
 import {
   HEADLESS_LOGIN_MESSAGE,
+  HTTP_LOGIN_MESSAGE,
   assertInteractiveLoginAllowed,
   interactiveLoginBlockedReason,
   isHttpMode,
@@ -18,21 +19,21 @@ describe("isHttpMode", () => {
 });
 
 describe("interactive login guard", () => {
-  it("blocks HTTP mode with a copy-session message", () => {
+  it("tells HTTP mode to reconnect the connector", () => {
     const reason = interactiveLoginBlockedReason({ httpMode: true, env: { DISPLAY: ":0" } });
-    assert.equal(reason, HEADLESS_LOGIN_MESSAGE);
-    assert.match(reason ?? "", /HELLOFRESH_SESSION_PATH/);
-    assert.match(reason ?? "", /npm run login/);
+    assert.equal(reason, HTTP_LOGIN_MESSAGE);
+    assert.match(reason ?? "", /authorize/);
+    assert.match(reason ?? "", /apiV2Auth/);
+    assert.doesNotMatch(reason ?? "", /HELLOFRESH_SESSION_PATH/);
     assert.doesNotMatch(reason ?? "", /GOOGLE_PASSWORD/);
   });
 
   it("blocks headless Linux without a display unless a headed launcher is injected", () => {
     const env = { DISPLAY: undefined, WAYLAND_DISPLAY: undefined } as unknown as NodeJS.ProcessEnv;
     if (process.platform === "linux") {
-      assert.equal(
-        interactiveLoginBlockedReason({ env, hasInjectedHeadedLauncher: false }),
-        HEADLESS_LOGIN_MESSAGE
-      );
+      const reason = interactiveLoginBlockedReason({ env, hasInjectedHeadedLauncher: false });
+      assert.equal(reason, HEADLESS_LOGIN_MESSAGE);
+      assert.match(reason ?? "", /npm run login/);
     }
     assert.equal(
       interactiveLoginBlockedReason({ env, hasInjectedHeadedLauncher: true }),

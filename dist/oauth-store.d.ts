@@ -12,6 +12,7 @@ export interface StoredOAuthClient {
 export interface StoredAccessToken {
     kind: "access";
     clientId: string;
+    userId: string;
     refreshHash: string;
     expiresAt: number;
     scopes: string[];
@@ -20,6 +21,7 @@ export interface StoredAccessToken {
 export interface StoredRefreshToken {
     kind: "refresh";
     clientId: string;
+    userId: string;
     accessHash: string;
     expiresAt: number;
     scopes: string[];
@@ -44,6 +46,7 @@ export declare class OAuthStore {
         accessToken: string;
         refreshToken: string;
         clientId: string;
+        userId: string;
         accessExpiresAt: number;
         refreshExpiresAt: number;
         scopes: string[];

@@ -5,10 +5,11 @@ exports.buildAuthorizationServerMetadata = buildAuthorizationServerMetadata;
 exports.oauthJson = oauthJson;
 exports.oauthErrorResponse = oauthErrorResponse;
 exports.resourcesEqual = resourcesEqual;
-exports.createStaticBearerAuthInfo = createStaticBearerAuthInfo;
-exports.parseBearerToken = parseBearerToken;
 const server_1 = require("@modelcontextprotocol/server");
 const config_js_1 = require("./config.js");
+const countries_js_1 = require("./countries.js");
+const hellofresh_api_js_1 = require("./hellofresh-api.js");
+const accounts_js_1 = require("./accounts.js");
 const security_js_1 = require("./security.js");
 Object.defineProperty(exports, "timingSafeEqualString", { enumerable: true, get: function () { return security_js_1.timingSafeEqualString; } });
 const PKCE_CHALLENGE = /^[A-Za-z0-9_-]{43,128}$/;
@@ -141,12 +142,14 @@ async function readFormOrJson(request) {
 class OwnerAuthorizationServer {
     config;
     store;
+    linker;
     pending = new Map();
     codes = new Map();
     rateLimiter;
-    constructor(config, store) {
+    constructor(config, store, linker) {
         this.config = config;
         this.store = store;
+        this.linker = linker;
         this.rateLimiter = new RateLimiter(config.authorizeMaxAttempts, config.authorizeWindowMs);
     }
     async handle(request) {
@@ -171,7 +174,7 @@ class OwnerAuthorizationServer {
     }
     async verifyAccessToken(token) {
         const record = await this.store.getToken(token);
-        if (!record || record.kind !== "access") {
+        if (!record || record.kind !== "access" || !record.userId) {
             throw new server_1.OAuthError(server_1.OAuthErrorCode.InvalidToken, "Access token is invalid");
         }
         const now = Date.now() / 1000;
@@ -184,6 +187,7 @@ class OwnerAuthorizationServer {
             scopes: record.scopes,
             expiresAt: record.expiresAt,
             resource: new URL(record.resource),
+            extra: { userId: record.userId },
         };
     }
     async handleRegister(request) {
@@ -296,32 +300,54 @@ class OwnerAuthorizationServer {
             scopes: scope.split(/[+\s]+/).filter(Boolean),
             expiresAt: Date.now() + config_js_1.AUTH_CODE_TTL_SEC * 1000,
         });
+        return this.renderAuthorize(id);
+    }
+    renderAuthorize(requestId, error) {
+        const options = countries_js_1.HELLOFRESH_COUNTRIES.map((country) => `<option value="${(0, security_js_1.htmlEscape)(country.code)}">${(0, security_js_1.htmlEscape)(country.label)}</option>`).join("");
+        const errorBlock = error ? `<p class="error">${(0, security_js_1.htmlEscape)(error)}</p>` : "";
         const body = `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Authorize HelloFresh MCP</title>
+  <title>Connect HelloFresh</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 28rem; margin: 4rem auto; padding: 0 1rem; color: #111; }
+    body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 3rem auto; padding: 0 1rem; color: #111; }
     code { background: #f4f4f4; padding: 0.1rem 0.3rem; }
     button { padding: 0.5rem 1rem; }
-    input[type=password] { width: 100%; padding: 0.5rem; box-sizing: border-box; }
+    input, select, textarea { width: 100%; padding: 0.5rem; box-sizing: border-box; }
     .note { color: #444; font-size: 0.9rem; }
+    .error { color: #8a1f1f; }
+    fieldset { margin: 1rem 0; }
   </style>
 </head>
 <body>
-  <h1>Authorize this connector</h1>
-  <p>This MCP server is single-user. Enter the <strong>owner secret</strong> from <code>MCP_OWNER_PASSWORD</code>.</p>
-  <p class="note">This is not a Google or HelloFresh password. Do not type Google credentials here.</p>
+  <h1>Connect your HelloFresh account</h1>
+  <p class="note">This links only your account. Do not type a Google password here.</p>
+  ${errorBlock}
   <form method="post" action="/authorize">
-    <input type="hidden" name="request_id" value="${(0, security_js_1.htmlEscape)(id)}">
+    <input type="hidden" name="request_id" value="${(0, security_js_1.htmlEscape)(requestId)}">
     <p>
-      <label>Owner secret<br>
-        <input type="password" name="password" autocomplete="current-password" required>
+      <label>Country<br>
+        <select name="country" required>
+          <option value="" selected disabled>Choose a country</option>
+          ${options}
+        </select>
       </label>
     </p>
-    <p><button type="submit">Allow access</button></p>
+    <fieldset>
+      <legend>HelloFresh password</legend>
+      <p class="note">The password for your HelloFresh account, not Google, Apple, or Facebook.</p>
+      <p><label>Email<br><input type="email" name="email" autocomplete="username"></label></p>
+      <p><label>Password<br><input type="password" name="password" autocomplete="current-password"></label></p>
+      <p><button type="submit" name="auth_method" value="password">Sign in</button></p>
+    </fieldset>
+    <fieldset>
+      <legend>I already signed in, including with Google</legend>
+      <p class="note">Sign in on the HelloFresh website yourself, then paste the <code>apiV2Auth</code> value from that browser. Only the HelloFresh tokens are kept.</p>
+      <p><label>apiV2Auth<br><textarea name="api_v2_auth" rows="4" autocomplete="off"></textarea></label></p>
+      <p><button type="submit" name="auth_method" value="token">Use this sign-in</button></p>
+    </fieldset>
   </form>
 </body>
 </html>`;
@@ -338,19 +364,47 @@ class OwnerAuthorizationServer {
         const ip = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
             request.headers.get("cf-connecting-ip") ||
             "local";
-        if (this.rateLimiter.tooMany(ip)) {
+        const form = await readFormOrJson(request);
+        const emailKey = form.email ? `email:${(0, accounts_js_1.normalizeEmail)(form.email)}` : undefined;
+        if (this.rateLimiter.tooMany(ip) || (emailKey && this.rateLimiter.tooMany(emailKey))) {
             return oauthErrorResponse(new server_1.OAuthError(server_1.OAuthErrorCode.TooManyRequests, "Too many authorize attempts"), 429);
         }
         this.rateLimiter.record(ip);
-        const form = await readFormOrJson(request);
+        if (emailKey) {
+            this.rateLimiter.record(emailKey);
+        }
         const pending = this.pending.get(form.request_id ?? "");
         if (!pending || pending.expiresAt < Date.now()) {
             this.pending.delete(form.request_id ?? "");
             return htmlError(400, "Authorization request expired. Start again from the client.");
         }
-        const submittedHash = (0, security_js_1.sha256Hex)(form.password ?? "");
-        if (!(0, security_js_1.timingSafeEqualHex)(submittedHash, this.config.ownerPasswordSha256Hex)) {
-            return htmlError(403, "Owner secret did not match.");
+        const method = form.auth_method === "token" ? "token" : "password";
+        let userId;
+        try {
+            if (method === "token") {
+                const linked = await this.linker.linkWithToken({
+                    country: form.country ?? "",
+                    token: form.api_v2_auth ?? "",
+                });
+                userId = linked.userId;
+            }
+            else {
+                const linked = await this.linker.linkWithPassword({
+                    country: form.country ?? "",
+                    email: form.email ?? "",
+                    password: form.password ?? "",
+                });
+                userId = linked.userId;
+            }
+        }
+        catch (error) {
+            if (error instanceof hellofresh_api_js_1.HelloFreshApiError && error.code === "rate_limited") {
+                return oauthErrorResponse(new server_1.OAuthError(server_1.OAuthErrorCode.TooManyRequests, "Too many authorize attempts"), 429);
+            }
+            const message = error instanceof hellofresh_api_js_1.HelloFreshApiError
+                ? error.message
+                : "HelloFresh did not accept these credentials.";
+            return this.renderAuthorize(pending.id, message);
         }
         this.pending.delete(pending.id);
         const code = (0, security_js_1.randomToken)(32);
@@ -360,6 +414,7 @@ class OwnerAuthorizationServer {
             codeChallenge: pending.codeChallenge,
             resource: pending.resource,
             scopes: pending.scopes.length ? pending.scopes : [config_js_1.MCP_SCOPE],
+            userId,
             expiresAt: Date.now() + config_js_1.AUTH_CODE_TTL_SEC * 1000,
         });
         const target = new URL(pending.redirectUri);
@@ -465,7 +520,7 @@ class OwnerAuthorizationServer {
         if (!resourcesEqual(resource, stored.resource)) {
             throw new server_1.OAuthError(server_1.OAuthErrorCode.InvalidTarget, "resource does not match the authorization");
         }
-        return this.issueTokens(client.clientId, stored.scopes, stored.resource);
+        return this.issueTokens(client.clientId, stored.userId, stored.scopes, stored.resource);
     }
     async rotateRefresh(client, body) {
         const refreshToken = body.refresh_token;
@@ -482,16 +537,19 @@ class OwnerAuthorizationServer {
         if (record.expiresAt <= Date.now() / 1000) {
             throw new server_1.OAuthError(server_1.OAuthErrorCode.InvalidGrant, "Refresh token expired");
         }
+        if (!record.userId) {
+            throw new server_1.OAuthError(server_1.OAuthErrorCode.InvalidGrant, "Refresh token is not linked to a HelloFresh account");
+        }
         const resource = body.resource ?? record.resource;
         if (!resourcesEqual(resource, record.resource)) {
             throw new server_1.OAuthError(server_1.OAuthErrorCode.InvalidTarget, "resource does not match the refresh token");
         }
-        return this.issueTokens(client.clientId, record.scopes, record.resource, {
+        return this.issueTokens(client.clientId, record.userId, record.scopes, record.resource, {
             replaceAccessHash: record.accessHash,
             replaceRefreshHash: (0, security_js_1.sha256Hex)(refreshToken),
         });
     }
-    async issueTokens(clientId, scopes, resource, replace) {
+    async issueTokens(clientId, userId, scopes, resource, replace) {
         const accessToken = `mcp_${(0, security_js_1.randomToken)(32)}`;
         const refreshToken = `mcr_${(0, security_js_1.randomToken)(32)}`;
         const now = Math.floor(Date.now() / 1000);
@@ -499,6 +557,7 @@ class OwnerAuthorizationServer {
             accessToken,
             refreshToken,
             clientId,
+            userId,
             accessExpiresAt: now + config_js_1.ACCESS_TOKEN_TTL_SEC,
             refreshExpiresAt: now + config_js_1.REFRESH_TOKEN_TTL_SEC,
             scopes,
@@ -544,21 +603,5 @@ function htmlError(status, message) {
         status,
         headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
     });
-}
-function createStaticBearerAuthInfo(token, resource) {
-    return {
-        token,
-        clientId: "owner-bearer",
-        scopes: [config_js_1.MCP_SCOPE],
-        expiresAt: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 365,
-        resource,
-    };
-}
-function parseBearerToken(header) {
-    if (!header) {
-        return undefined;
-    }
-    const match = /^Bearer\s+(\S+)/i.exec(header);
-    return match?.[1];
 }
 //# sourceMappingURL=oauth.js.map

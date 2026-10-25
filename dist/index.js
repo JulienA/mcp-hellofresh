@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-const browser_js_1 = require("./browser.js");
 const config_js_1 = require("./config.js");
 const http_js_1 = require("./http.js");
+const hellofresh_session_js_1 = require("./hellofresh-session.js");
 const login_mode_js_1 = require("./login-mode.js");
 const mcp_server_js_1 = require("./mcp-server.js");
 function printHttpHelp() {
@@ -16,14 +16,21 @@ HTTP flags and environment:
   --host <host>               Bind address (HOST, default 127.0.0.1)
   --port <port>               Bind port (PORT, default 8080)
   PUBLIC_BASE_URL             Public HTTPS origin (required off localhost)
-  MCP_OWNER_PASSWORD          Owner secret for the authorize page (required in HTTP mode)
-  MCP_OWNER_PASSWORD_HASH     sha256:<hex> alternative to MCP_OWNER_PASSWORD
-  MCP_BEARER_TOKEN            Optional static bearer token for other clients
-  MCP_OAUTH_STORE_PATH        Persisted clients/tokens file (mode 0600)
+  MCP_OAUTH_STORE_PATH        Persisted OAuth clients and tokens (mode 0600)
+  MCP_USERS_DIR               Directory of per-account HelloFresh tokens
   MCP_OAUTH_REDIRECT_HOSTS    Comma-separated redirect hosts (default: claude.ai, claude.com, chatgpt.com)
-  HELLOFRESH_SESSION_PATH     Copied HelloFresh session.json from \`npm run login\`
+  HELLOFRESH_COUNTRY          Country code for stdio login (default us)
 
-The authorize page asks for the owner secret only. Never store Google credentials.
+Connect https://<host>/mcp in Claude or ChatGPT. Each person signs in on
+/authorize with their HelloFresh password, or pastes apiV2Auth after signing
+in on the HelloFresh website (Continue with Google included). There is no
+shared owner secret. Do not send a Google password.
+
+The HelloFresh API used here is unofficial and can change. A bot-protection
+block is not a wrong password.
+
+Stdio (one person): HELLOFRESH_EMAIL and HELLOFRESH_PASSWORD sign in a
+password account, or run \`npm run login\` on a machine with a display.
 `);
 }
 async function main() {
@@ -32,7 +39,6 @@ async function main() {
         printHttpHelp();
         return;
     }
-    const hellofresh = new browser_js_1.HelloFreshBrowser();
     if ((0, login_mode_js_1.isHttpMode)(argv)) {
         let config;
         try {
@@ -44,7 +50,7 @@ async function main() {
             process.exitCode = 1;
             return;
         }
-        const handle = await (0, http_js_1.startHttpServer)(config, hellofresh);
+        const handle = await (0, http_js_1.startHttpServer)(config);
         console.error(`HelloFresh MCP server listening on http://${config.host}:${handle.config.port}  MCP ${handle.config.resourceUrl.href}`);
         const shutdown = async () => {
             await handle.close();
@@ -54,7 +60,8 @@ async function main() {
         process.on("SIGTERM", () => void shutdown());
         return;
     }
-    const server = new mcp_server_js_1.HelloFreshMCPServer(hellofresh, { allowInteractiveLogin: true });
+    const session = (0, hellofresh_session_js_1.createStdioSession)();
+    const server = new mcp_server_js_1.HelloFreshMCPServer(session, { allowInteractiveLogin: true });
     await server.runStdio();
 }
 main().catch((error) => {

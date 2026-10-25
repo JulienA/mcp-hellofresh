@@ -1,23 +1,22 @@
-FROM mcr.microsoft.com/playwright:v1.64.1-noble
+FROM node:22-bookworm-slim
 
 ENV NODE_ENV=production \
-    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
     HOST=0.0.0.0 \
     PORT=8080 \
-    HELLOFRESH_SESSION_PATH=/data/session.json \
-    MCP_OAUTH_STORE_PATH=/data/oauth-store.json
+    MCP_OAUTH_STORE_PATH=/data/oauth-store.json \
+    MCP_USERS_DIR=/data/users
 
 WORKDIR /app
 
-RUN mkdir -p /data && chown -R pwuser:pwuser /data /app
+RUN mkdir -p /data/users && chown -R node:node /data /app
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && chown -R pwuser:pwuser /app
+RUN npm ci --omit=dev --omit=optional && chown -R node:node /app
 
-COPY --chown=pwuser:pwuser dist ./dist
-COPY --chown=pwuser:pwuser README.md ./
+COPY --chown=node:node dist ./dist
+COPY --chown=node:node README.md ./
 
-USER pwuser
+USER node
 VOLUME ["/data"]
 EXPOSE 8080
 
