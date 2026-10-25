@@ -70,6 +70,7 @@ The HelloFresh sign-in happens in the browser, on the Better Auth login page (`/
 1. Choose the country.
 2. Either enter the HelloFresh email and password (not a Google, Apple, or Facebook password), or sign in on the HelloFresh website yourself — **Continue with Google** included — and paste the `apiV2Auth` value from that browser.
 3. The server keeps the HelloFresh access token and refresh token, checks `GET /gw/api/customers/me/subscriptions`, and discards the password and the raw paste.
+4. Confirm on `/consent` that this Claude or ChatGPT connector may use that account. GET never issues a code.
 
 The password is never stored. HelloFresh access tokens refresh from the saved refresh token. When HelloFresh rejects the refresh, disconnect the connector and connect it again.
 
@@ -101,7 +102,7 @@ Better Auth rate-limits OAuth endpoints (token, authorize, register, revoke) and
 
 JSON logs go to stderr (`docker compose logs`). Each line has `ts`, `level`, and `msg` (`http.request`, `oauth.authorize`, `oauth.register`, `mcp.tool`, `hellofresh.request`). They include method, path, status, duration, OAuth outcome, tool name, and a truncated account id. They do not include passwords, tokens, emails, or `Authorization` headers. `/healthz` is logged at `debug`.
 
-Endpoints: `/mcp` (MCP methods after JWT bearer auth), `GET /healthz`, `/sign-in` (HelloFresh link), and Better Auth OAuth (`/.well-known/oauth-authorization-server`, `/jwks`, `/oauth2/authorize`, `/oauth2/token`, `/oauth2/register`, `/oauth2/revoke`). RFC 9728 resource metadata is served by the MCP SDK. Redirect URIs are allowlisted.
+Endpoints: `/mcp` (MCP methods after JWT bearer auth), `GET /healthz`, `/sign-in` (HelloFresh link), `/consent` (connector confirmation), and Better Auth OAuth (`/.well-known/oauth-authorization-server`, `/jwks`, `/oauth2/authorize`, `/oauth2/token`, `/oauth2/register`, `/oauth2/revoke`). RFC 9728 resource metadata is served by the MCP SDK. Redirect URIs are allowlisted.
 
 **claude.ai:** Settings → Connectors → custom connector → `https://<your-host>/mcp`.  
 **ChatGPT:** Connectors → MCP connector with the same URL.
@@ -211,6 +212,7 @@ claude mcp add hellofresh -- node /path/to/mcp-hellofresh/dist/index.js
 - A previous plaintext HelloFresh token file is read once when the key is set, and rewritten encrypted on the next save. The key is never logged.
 - Every MCP access token is a signed JWT. `/mcp` verifies signature, `iss`, `aud` (RFC 8707 resource), `exp`, and `mcp` scope with `jose`, then requires `userId`.
 - `/sign-in` stores the visitor's HelloFresh tokens on this server. The form uses Better Auth origin checks plus a signed OAuth query, and sets `frame-ancestors 'none'`.
+- `/consent` is required before an authorization code is issued. GET only renders the form. POST needs the session cookie, a signed OAuth query, a session-bound CSRF token, and a same-origin `Origin` header. Dynamically registered clients do not skip this step.
 - `logout` removes one account. It does not sign you out of Google.
 - Redirect URIs are allowlisted. The public URL must be HTTPS except on localhost.
 - This does not bypass bot protection. If HelloFresh or Cloudflare blocks the call, the error says it is not a wrong password.

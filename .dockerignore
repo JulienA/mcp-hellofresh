@@ -7,7 +7,6 @@ session.json
 *.session.json
 oauth-store.json
 *.oauth-store.json
-src
 **/*.test.ts
 .env
 .env.*

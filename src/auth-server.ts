@@ -1,8 +1,9 @@
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { chmod, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { betterAuth } from "better-auth";
-import { createAuthEndpoint } from "better-auth/api";
+import { createAuthEndpoint, getSessionFromCtx } from "better-auth/api";
 import { setSessionCookie } from "better-auth/cookies";
 import { jwt } from "better-auth/plugins";
 import { cimd } from "@better-auth/cimd";
@@ -129,6 +130,7 @@ export async function createAuthorizationServer(
 
   const ctx = await auth.$context;
   await ctx.runMigrations();
+  clearStoredSkipConsent(db);
   await chmod(config.authDbPath, 0o600).catch(() => undefined);
 
   const handler = async (request: Request): Promise<Response> => {
@@ -163,13 +165,6 @@ type AuthInstance = {
   handler: (request: Request) => Promise<Response>;
   $context: Promise<{
     runMigrations: () => Promise<void>;
-    adapter: {
-      update: (data: {
-        model: string;
-        where: Array<{ field: string; value: string }>;
-        update: Record<string, unknown>;
-      }) => Promise<unknown>;
-    };
     internalAdapter: {
       findUserByEmail: (email: string) => Promise<{ user: UserRecord } | null>;
       createUser: (
@@ -185,12 +180,6 @@ type AuthInstance = {
     };
     secret: string;
   }>;
-  api: {
-    oauth2Consent: (input: {
-      body: { accept: boolean; oauth_query: string };
-      headers: Headers;
-    }) => Promise<{ url?: string }>;
-  };
 };
 
 type UserRecord = {
@@ -328,14 +317,68 @@ function helloFreshInteractionPlugin(options: {
           if (!query || !(await verifyOAuthQueryParams(query, ctx.context.secret))) {
             return htmlError(400, "Authorization request expired. Start again from the client.");
           }
+          const sessionId = await sessionIdFrom(ctx);
+          if (!sessionId) {
+            return ctx.redirect(`/sign-in?${query}`);
+          }
+          log.info("oauth.authorize", {
+            outcome: "consent",
+            clientId: clientIdFromQuery(query),
+          });
+          return renderConsent(query, consentNonce(ctx.context.secret, sessionId, query));
+        }
+      ),
+      consentSubmit: createAuthEndpoint(
+        "/consent",
+        {
+          method: "POST",
+          metadata: {
+            allowedMediaTypes: ["application/x-www-form-urlencoded"],
+          },
+          body: z.object({
+            nonce: z.string().optional(),
+            decision: z.string().optional(),
+          }),
+        },
+        async (ctx) => {
+          const query = signedQueryFrom(ctx.request);
+          if (!query || !(await verifyOAuthQueryParams(query, ctx.context.secret))) {
+            return htmlError(400, "Authorization request expired. Start again from the client.");
+          }
+          const sessionId = await sessionIdFrom(ctx);
+          if (!sessionId) {
+            return ctx.redirect(`/sign-in?${query}`);
+          }
+          const expected = consentNonce(ctx.context.secret, sessionId, query);
+          if (!csrfMatches(expected, ctx.body.nonce ?? "")) {
+            log.warn("oauth.authorize", { outcome: "rejected", reason: "consent_csrf" });
+            return htmlError(400, "Could not complete authorization. Start again from the client.");
+          }
+          const accept = ctx.body.decision === "allow";
+          if (!accept && ctx.body.decision !== "deny") {
+            return htmlError(400, "Could not complete authorization. Start again from the client.");
+          }
+          const request = ctx.request;
+          if (!request) {
+            return htmlError(400, "Could not complete authorization. Start again from the client.");
+          }
           try {
-            const result = await options.getAuth().api.oauth2Consent({
-              body: { accept: true, oauth_query: query },
-              headers: ctx.headers ?? ctx.request?.headers ?? new Headers(),
-            });
-            if (result && typeof result === "object" && "url" in result && typeof result.url === "string") {
-              return ctx.redirect(result.url);
+            const completed = await completeOAuthConsent(options.getAuth(), request, query, accept);
+            if (completed.status === 302 || completed.status === 303) {
+              const location = completed.headers.get("location");
+              if (location) {
+                log.info("oauth.authorize", {
+                  outcome: accept ? "accepted" : "denied",
+                  clientId: clientIdFromQuery(query),
+                });
+                return ctx.redirect(location);
+              }
             }
+            log.warn("oauth.authorize", {
+              outcome: "rejected",
+              reason: "consent",
+              status: completed.status,
+            });
           } catch (error) {
             log.warn("oauth.authorize", {
               outcome: "rejected",
@@ -389,7 +432,6 @@ async function registerWithAllowlist(
   }
   const registered = (await response.json()) as { client_id?: string; client_name?: string };
   if (typeof registered.client_id === "string") {
-    await skipConsentForClient(auth, registered.client_id);
     log.info("oauth.register", {
       clientId: registered.client_id,
       clientName: registered.client_name,
@@ -405,13 +447,22 @@ async function registerWithAllowlist(
   });
 }
 
-async function skipConsentForClient(auth: AuthInstance, clientId: string): Promise<void> {
-  const { adapter } = await auth.$context;
-  await adapter.update({
-    model: "oauthClient",
-    where: [{ field: "clientId", value: clientId }],
-    update: { skipConsent: true },
-  });
+function clearStoredSkipConsent(db: DatabaseSync): void {
+  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{
+    name: string;
+  }>;
+  const table = tables.map((row) => row.name).find((name) => name === "oauthClient" || name === "oauth_client");
+  if (!table) {
+    return;
+  }
+  const columns = db.prepare(`PRAGMA table_info("${table}")`).all() as Array<{ name: string }>;
+  const column = columns
+    .map((row) => row.name)
+    .find((name) => name === "skipConsent" || name === "skip_consent");
+  if (!column) {
+    return;
+  }
+  db.exec(`UPDATE "${table}" SET "${column}" = 0`);
 }
 
 function signedQueryFrom(request: Request | undefined): string {
@@ -419,6 +470,58 @@ function signedQueryFrom(request: Request | undefined): string {
     return "";
   }
   return new URL(request.url).search.replace(/^\?/, "");
+}
+
+async function sessionIdFrom(ctx: Parameters<typeof getSessionFromCtx>[0]): Promise<string> {
+  const session = await getSessionFromCtx(ctx, { disableRefresh: true });
+  const id = session?.session?.id;
+  return typeof id === "string" ? id : "";
+}
+
+function clientIdFromQuery(query: string): string | undefined {
+  return new URLSearchParams(query).get("client_id") ?? undefined;
+}
+
+function consentNonce(secret: string, sessionId: string, query: string): string {
+  return createHmac("sha256", secret).update(sessionId).update("\0").update(query).digest("base64url");
+}
+
+async function completeOAuthConsent(
+  auth: AuthInstance,
+  request: Request,
+  query: string,
+  accept: boolean
+): Promise<Response> {
+  const headers = new Headers();
+  const cookie = request.headers.get("cookie");
+  if (cookie) {
+    headers.set("cookie", cookie);
+  }
+  const origin = request.headers.get("origin");
+  if (origin) {
+    headers.set("origin", origin);
+  }
+  const referer = request.headers.get("referer");
+  if (referer) {
+    headers.set("referer", referer);
+  }
+  headers.set("content-type", "application/json");
+  headers.set("accept", "application/json");
+  return asBrowserRedirect(
+    await auth.handler(
+      new Request(new URL("/oauth2/consent", request.url), {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ accept, oauth_query: query }),
+      })
+    )
+  );
+}
+
+function csrfMatches(expected: string, provided: string): boolean {
+  const left = Buffer.from(expected);
+  const right = Buffer.from(provided);
+  return left.length === right.length && timingSafeEqual(left, right);
 }
 
 /**
@@ -452,6 +555,40 @@ async function asBrowserRedirect(response: Response): Promise<Response> {
   headers.delete("content-length");
   headers.set("location", (body as { url: string }).url);
   return new Response(null, { status: 302, headers });
+}
+
+function renderConsent(query: string, nonce: string): Response {
+  const params = new URLSearchParams(query);
+  const clientId = params.get("client_id") ?? "";
+  const redirectUri = params.get("redirect_uri") ?? "";
+  const body = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Allow this connector</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 3rem auto; padding: 0 1rem; color: #111; }
+    code { background: #f4f4f4; padding: 0.1rem 0.3rem; word-break: break-all; }
+    button { padding: 0.5rem 1rem; margin-right: 0.5rem; }
+    .note { color: #444; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>Allow this connector?</h1>
+  <p>This lets the app use your HelloFresh account on this server. It cannot see your HelloFresh password.</p>
+  <p class="note">Client <code>${htmlEscape(clientId)}</code></p>
+  <p class="note">Redirect <code>${htmlEscape(redirectUri)}</code></p>
+  <form method="post" action="/consent?${htmlEscape(query)}">
+    <input type="hidden" name="nonce" value="${htmlEscape(nonce)}">
+    <p>
+      <button type="submit" name="decision" value="allow">Allow</button>
+      <button type="submit" name="decision" value="deny">Deny</button>
+    </p>
+  </form>
+</body>
+</html>`;
+  return new Response(body, { status: 200, headers: HTML_HEADERS });
 }
 
 function renderAuthorize(error?: string): Response {
