@@ -184,7 +184,7 @@ claude mcp add hellofresh -- npx -y @striderlabs/mcp-hellofresh
 
 `modify_subscription`: optional `meals_per_week` (2–5), `servings_per_meal` (2–4), `frequency` (`weekly` or `biweekly`). Frequency is not sent to HelloFresh; the result says it was left unchanged.
 
-`get_past_orders`: optional `limit` (1–50, default 10).
+`get_past_orders`: optional `limit` (1–50, default 10). Each order is a week (`orderId`, `menuId`) and the meals HelloFresh returned for it. Meals use the same fields as `get_menu`, plus `websiteURL` and `cuisines` when present. `deliveryDate`, `status`, and `totalPrice` are `null` when that response omits them. Older weeks follow the `nextWeek` cursor until `limit`.
 
 `rate_recipe`: kept so older clients still see the tool. It returns an error. Rate the recipe on the HelloFresh website.
 

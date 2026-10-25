@@ -637,21 +637,53 @@ export class HelloFreshApi {
       if (!subscription.id) {
         throw new HelloFreshApiError("api", "HelloFresh did not return a subscription id.");
       }
-      const payload = await this.getJson("/gw/my-deliveries/past-deliveries", {
-        country: this.country.apiCountry,
-        locale: this.country.locale,
-        subscription: subscription.id,
-      });
-      const weeks = asList(payload, ["weeks", "items", "data"])
-        .map(asRecord)
-        .filter((item): item is Record<string, unknown> => Boolean(item));
-      return weeks.slice(0, limit).map((week) => ({
-        orderId: stringField(week, ["id", "week", "weekId"]) ?? "",
-        deliveryDate: stringField(week, ["deliveryDate", "delivery_date"]) ?? "",
-        status: stringField(week, ["status", "state"]) ?? "",
-        meals: [],
-        totalPrice: 0,
-      }));
+      const french = frenchTagLabels(this.country.code);
+      const orders: Array<Record<string, unknown>> = [];
+      const seenWeeks = new Set<string>();
+      const seenCursors = new Set<string>();
+      let from: string | undefined;
+      while (orders.length < limit) {
+        const params: Record<string, string> = {
+          country: this.country.apiCountry,
+          locale: this.country.locale,
+          subscription: subscription.id,
+        };
+        if (from) {
+          params.from = from;
+        }
+        const payload = await this.getJson("/gw/my-deliveries/past-deliveries", params);
+        const record = asRecord(payload) ?? {};
+        const weeks = asList(payload, ["weeks", "items", "data"])
+          .map(asRecord)
+          .filter((item): item is Record<string, unknown> => Boolean(item));
+        if (weeks.length === 0) {
+          break;
+        }
+        let added = 0;
+        for (const week of weeks) {
+          if (orders.length >= limit) {
+            break;
+          }
+          const order = pastOrderFromWeek(week, french);
+          if (!order) {
+            continue;
+          }
+          const orderId = String(order.orderId);
+          if (seenWeeks.has(orderId)) {
+            continue;
+          }
+          seenWeeks.add(orderId);
+          orders.push(order);
+          added += 1;
+        }
+        const next = stringField(record, ["nextWeek"]);
+        if (added === 0 || !next || seenCursors.has(next)) {
+          break;
+        }
+        seenCursors.add(next);
+        from = next;
+      }
+      return orders;
     });
   }
 
@@ -1574,6 +1606,65 @@ function uniqueNames(names: string[]): string[] {
     unique.push(name);
   }
   return unique;
+}
+
+function pastOrderFromWeek(week: Record<string, unknown>, french: boolean): Record<string, unknown> | undefined {
+  const orderId = stringField(week, ["week", "id", "weekId"]);
+  if (!orderId) {
+    return undefined;
+  }
+  return {
+    orderId,
+    menuId: stringField(week, ["menuId", "menu_id"]) ?? null,
+    deliveryDate: stringField(week, ["deliveryDate", "delivery_date"]) ?? null,
+    status: stringField(week, ["status", "state"]) ?? null,
+    meals: pastOrderMeals(week, french),
+    totalPrice: numberField(week, ["totalPrice", "total_price", "grandTotal", "price"]) ?? null,
+  };
+}
+
+function pastOrderMeals(week: Record<string, unknown>, french: boolean): Array<Record<string, unknown>> {
+  const recipes = new Map<string, Record<string, unknown>>();
+  for (const meal of asList(week, ["meals", "courses", "recipes", "items"])) {
+    const record = asRecord(meal);
+    if (!record) {
+      continue;
+    }
+    const recipe = asRecord(record.recipe) ?? record;
+    const id = stringField(recipe, ["id", "recipeId"]);
+    if (id && !recipes.has(id)) {
+      recipes.set(id, recipe);
+    }
+  }
+  return recipesFromPayload(week, french).map((draft) => {
+    const recipe = recipes.get(draft.summary.id);
+    const websiteURL = recipe ? stringField(recipe, ["websiteURL", "websiteUrl"]) : undefined;
+    const cuisines = recipe ? cuisineNames(recipe) : [];
+    return {
+      ...draft.summary,
+      ...(websiteURL ? { websiteURL } : {}),
+      ...(cuisines.length > 0 ? { cuisines } : {}),
+    };
+  });
+}
+
+function cuisineNames(recipe: Record<string, unknown>): string[] {
+  const names: string[] = [];
+  for (const item of asList(recipe, ["cuisines"])) {
+    if (typeof item === "string") {
+      const name = item.trim();
+      if (name) {
+        names.push(name);
+      }
+      continue;
+    }
+    const record = asRecord(item);
+    const name = record ? stringField(record, ["name"])?.trim() : undefined;
+    if (name) {
+      names.push(name);
+    }
+  }
+  return names;
 }
 
 function recipesFromPayload(payload: unknown, french: boolean): MenuRecipeDraft[] {
