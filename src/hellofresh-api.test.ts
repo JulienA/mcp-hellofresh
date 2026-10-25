@@ -677,10 +677,11 @@ describe("past deliveries", () => {
     assert.deepEqual(orders, [
       {
         orderId: "2020-W01",
+        menuId: null,
         deliveryDate: "2020-01-01",
         status: "DELIVERED",
         meals: [],
-        totalPrice: 0,
+        totalPrice: null,
       },
     ]);
   });
@@ -1174,6 +1175,97 @@ describe("HelloFreshApi menu calories, allergens, and tags", () => {
 
 const RECIPE_A = "6a72e7f4ebec54be3cd9b330";
 const RECIPE_B = "6a72e7f4ebec54be3cd9b331";
+
+describe("HelloFreshApi.getPastOrders", () => {
+  it("returns the meals from each past week and follows nextWeek", async () => {
+    const penne = {
+      id: "6a5de2e1788d6aebbf5cc206",
+      name: "Penne au poulet doré, persil & gouda",
+      headline: "avec des épices à l'italienne & des légumes",
+      prepTime: "PT25M",
+      image: "https://img.hellofresh.com/q_auto/recipes/image/penne.jpg",
+      websiteURL: "https://www.hellofresh.fr/recipes/penne-au-poulet-dore-persil-and-gouda-6a5de2e1788d6aebbf5cc206",
+      label: { text: "Pépite du Moment", handle: "customer-favourite", displayLabel: true },
+      tags: [
+        { name: "Peu de vaisselle", type: "easy-cleanup", displayLabel: true },
+        { name: "pasta-noodles", type: "pasta-noodles", displayLabel: false },
+      ],
+      nutrition: { energy: 3673, calories: 878 },
+      cuisines: [{ name: "Italienne", type: "italian" }],
+    };
+    const { fetchImpl, calls } = recorded((call) => {
+      if (call.url.includes("/customers/me/subscriptions")) {
+        return Response.json(subscriptionBody());
+      }
+      if (!call.url.includes("/past-deliveries")) {
+        return Response.json({ message: "missing" }, { status: 404 });
+      }
+      const from = new URL(call.url).searchParams.get("from");
+      if (!from) {
+        return Response.json({
+          weeks: [
+            { week: "2026-W44", menuId: "menu-44", meals: [penne] },
+            {
+              week: "2026-W42",
+              menuId: "menu-42",
+              meals: [{ id: "meal-42", name: "Tarte fine forestière", headline: "avec du thym", prepTime: "PT30M" }],
+            },
+          ],
+          nextWeek: "2026-W40",
+        });
+      }
+      assert.equal(from, "2026-W40");
+      return Response.json({
+        weeks: [
+          {
+            id: "2026-W40",
+            menuId: "menu-40",
+            deliveryDate: "2026-10-01",
+            status: "DELIVERED",
+            totalPrice: 49.9,
+            meals: [{ id: "meal-40", name: "Farfalle au pesto", headline: "avec du pecorino" }],
+          },
+        ],
+        nextWeek: "2026-W40",
+      });
+    });
+    const api = new HelloFreshApi(stored("access", Math.floor(Date.now() / 1000), 1800), fetchImpl);
+    const orders = await api.getPastOrders(10);
+    const pastCalls = calls.filter((call) => call.url.includes("/past-deliveries"));
+    assert.equal(pastCalls.length, 2);
+    assert.equal(calls.filter((call) => call.url.includes("/customers/me/subscriptions")).length, 1);
+    for (const call of pastCalls) {
+      const params = new URL(call.url).searchParams;
+      assert.equal(params.get("subscription"), "sub-1");
+      assert.equal(params.has("rating-scale"), false);
+    }
+    assert.equal(new URL(pastCalls[0].url).searchParams.has("from"), false);
+    assert.equal(new URL(pastCalls[1].url).searchParams.get("from"), "2026-W40");
+    assert.deepEqual(
+      orders.map((order) => order.orderId),
+      ["2026-W44", "2026-W42", "2026-W40"]
+    );
+    assert.equal(orders[0]?.menuId, "menu-44");
+    assert.equal(orders[0]?.deliveryDate, null);
+    assert.equal(orders[0]?.status, null);
+    assert.equal(orders[0]?.totalPrice, null);
+    const meals = orders[0]?.meals as Array<Record<string, unknown>>;
+    assert.equal(meals.length, 1);
+    assert.equal(meals[0]?.name, "Penne au poulet doré, persil & gouda");
+    assert.equal(meals[0]?.description, "avec des épices à l'italienne & des légumes");
+    assert.equal(meals[0]?.prepTime, 25);
+    assert.equal(meals[0]?.calories, 878);
+    assert.equal(meals[0]?.label, "Pépite du Moment");
+    assert.deepEqual(meals[0]?.tags, ["Peu de vaisselle"]);
+    assert.deepEqual(meals[0]?.cuisines, ["Italienne"]);
+    assert.equal(meals[0]?.websiteURL, penne.websiteURL);
+    assert.equal(meals[0]?.imageUrl, penne.image);
+    assert.equal(orders[2]?.deliveryDate, "2026-10-01");
+    assert.equal(orders[2]?.status, "DELIVERED");
+    assert.equal(orders[2]?.totalPrice, 49.9);
+    assert.equal((orders[2]?.meals as Array<Record<string, unknown>>).length, 1);
+  });
+});
 
 describe("HelloFreshApi recipe details cache", () => {
   beforeEach(() => {
