@@ -591,6 +591,58 @@ describe("stdio account", () => {
   });
 });
 
+describe("past deliveries", () => {
+  it("sends the subscription id and leaves from and rating-scale off the request", async () => {
+    const { fetchImpl, calls } = recorded((call) => {
+      if (call.url.includes("/customers/me/subscriptions")) {
+        const body = subscriptionBody() as { items: Array<Record<string, unknown>> };
+        body.items[0].id = 812405;
+        return Response.json(body);
+      }
+      if (call.url.includes("/past-deliveries")) {
+        return Response.json({ weeks: [{ id: "2020-W01", deliveryDate: "2020-01-01", status: "DELIVERED" }] });
+      }
+      return okAccount(call) ?? Response.json({}, { status: 404 });
+    });
+    const api = new HelloFreshApi(stored("access", Math.floor(Date.now() / 1000), 1800), fetchImpl);
+    const orders = await api.getPastOrders(10);
+    const past = calls.filter((call) => call.url.includes("/past-deliveries"));
+    assert.equal(past.length, 1);
+    const params = new URL(past[0].url).searchParams;
+    assert.equal(params.get("subscription"), "812405");
+    assert.equal(params.get("country"), "FR");
+    assert.equal(params.get("locale"), "fr-FR");
+    assert.equal(params.has("from"), false);
+    assert.equal(params.has("rating-scale"), false);
+    assert.deepEqual(orders, [
+      {
+        orderId: "2020-W01",
+        deliveryDate: "2020-01-01",
+        status: "DELIVERED",
+        meals: [],
+        totalPrice: 0,
+      },
+    ]);
+  });
+
+  it("rejects a subscription with no id before calling past deliveries", async () => {
+    const { fetchImpl, calls } = recorded((call) => {
+      if (call.url.includes("/customers/me/subscriptions")) {
+        return Response.json({ items: [{ customerPlanId: "plan-1" }] });
+      }
+      return okAccount(call) ?? Response.json({}, { status: 404 });
+    });
+    const api = new HelloFreshApi(stored("access", Math.floor(Date.now() / 1000), 1800), fetchImpl);
+    await assert.rejects(() => api.getPastOrders(10), (error: unknown) => {
+      assert.ok(error instanceof HelloFreshApiError);
+      assert.equal(error.code, "api");
+      assert.match(error.message, /subscription id/);
+      return true;
+    });
+    assert.equal(calls.some((call) => call.url.includes("/past-deliveries")), false);
+  });
+});
+
 describe("upcoming deliveries", () => {
   it("keeps the unscoped deliveries URL and returns selected meals for weeks still ahead", async () => {
     const { fetchImpl, calls } = recorded((call) => {
