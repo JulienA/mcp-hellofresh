@@ -6,4 +6,7 @@ session.json
 oauth-store.json
 *.oauth-store.json
 .mcp-hellofresh/
+.env
+.env.*
+
 

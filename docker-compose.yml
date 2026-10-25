@@ -1,0 +1,22 @@
+# One HTTP process, many HelloFresh accounts.
+# PUBLIC_BASE_URL is the HTTPS origin clients call, with no path.
+#
+#   PUBLIC_BASE_URL=https://hf-mcp.example.com docker compose up -d --build
+#
+# Or put that line in a .env file next to this file. Compose reads it for
+# interpolation and refuses to start when the variable is missing.
+
+services:
+  mcp-hellofresh:
+    build: .
+    image: mcp-hellofresh
+    ports:
+      - "8080:8080"
+    environment:
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?Set PUBLIC_BASE_URL to the public HTTPS origin, with no path}
+    volumes:
+      - hellofresh-data:/data
+    restart: unless-stopped
+
+volumes:
+  hellofresh-data:
