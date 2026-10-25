@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-const index_js_1 = require("@modelcontextprotocol/sdk/server/index.js");
-const stdio_js_1 = require("@modelcontextprotocol/sdk/server/stdio.js");
-const types_js_1 = require("@modelcontextprotocol/sdk/types.js");
+const server_1 = require("@modelcontextprotocol/server");
+const stdio_1 = require("@modelcontextprotocol/server/stdio");
 const zod_1 = require("zod");
 const auth_js_1 = require("./auth.js");
 const browser_js_1 = require("./browser.js");
@@ -11,7 +10,6 @@ const AUTH_TOOL_NAMES = new Set(["auth_status", "login", "logout"]);
 // ─── Schemas ──────────────────────────────────────────────────────────────────
 const GetMenuSchema = zod_1.z.object({
     week_offset: zod_1.z
-        .number()
         .int()
         .min(0)
         .max(4)
@@ -30,7 +28,6 @@ const SelectMealsSchema = zod_1.z.object({
         .array(zod_1.z.object({
         recipe_id: zod_1.z.string().describe("Recipe ID to select"),
         servings: zod_1.z
-            .number()
             .int()
             .min(1)
             .max(6)
@@ -73,14 +70,12 @@ const UpdatePreferencesSchema = zod_1.z.object({
 });
 const ModifySubscriptionSchema = zod_1.z.object({
     meals_per_week: zod_1.z
-        .number()
         .int()
         .min(2)
         .max(5)
         .optional()
         .describe("Number of meals per week (2-5)"),
     servings_per_meal: zod_1.z
-        .number()
         .int()
         .min(2)
         .max(4)
@@ -93,7 +88,6 @@ const ModifySubscriptionSchema = zod_1.z.object({
 });
 const GetPastOrdersSchema = zod_1.z.object({
     limit: zod_1.z
-        .number()
         .int()
         .min(1)
         .max(50)
@@ -104,7 +98,6 @@ const GetPastOrdersSchema = zod_1.z.object({
 const RateRecipeSchema = zod_1.z.object({
     recipe_id: zod_1.z.string().describe("The recipe ID to rate"),
     rating: zod_1.z
-        .number()
         .int()
         .min(1)
         .max(5)
@@ -148,7 +141,7 @@ const TOOLS = [
             type: "object",
             properties: {
                 week_offset: {
-                    type: "number",
+                    type: "integer",
                     description: "Week offset from current week (0 = current, 1 = next week, etc.)",
                     default: 0,
                     minimum: 0,
@@ -189,7 +182,7 @@ const TOOLS = [
                         properties: {
                             recipe_id: { type: "string", description: "Recipe ID to select" },
                             servings: {
-                                type: "number",
+                                type: "integer",
                                 description: "Number of servings (optional)",
                                 minimum: 1,
                                 maximum: 6,
@@ -298,13 +291,13 @@ const TOOLS = [
             type: "object",
             properties: {
                 meals_per_week: {
-                    type: "number",
+                    type: "integer",
                     description: "Number of meals per week (2-5)",
                     minimum: 2,
                     maximum: 5,
                 },
                 servings_per_meal: {
-                    type: "number",
+                    type: "integer",
                     description: "Number of servings per meal (2-4)",
                     minimum: 2,
                     maximum: 4,
@@ -324,7 +317,7 @@ const TOOLS = [
             type: "object",
             properties: {
                 limit: {
-                    type: "number",
+                    type: "integer",
                     description: "Maximum number of past orders to retrieve (default: 10, max: 50)",
                     default: 10,
                     minimum: 1,
@@ -344,7 +337,7 @@ const TOOLS = [
                     description: "The recipe ID to rate",
                 },
                 rating: {
-                    type: "number",
+                    type: "integer",
                     description: "Rating from 1 (poor) to 5 (excellent)",
                     minimum: 1,
                     maximum: 5,
@@ -364,7 +357,7 @@ class HelloFreshMCPServer {
     server;
     hellofresh;
     constructor() {
-        this.server = new index_js_1.Server({ name: "@striderlabs/mcp-hellofresh", version: "1.0.0" }, { capabilities: { tools: {} } });
+        this.server = new server_1.Server({ name: "@striderlabs/mcp-hellofresh", version: "1.0.0" }, { capabilities: { tools: {} } });
         this.hellofresh = new browser_js_1.HelloFreshBrowser();
         this.setupHandlers();
     }
@@ -372,10 +365,10 @@ class HelloFreshMCPServer {
         await this.hellofresh.ensureReady((0, auth_js_1.readOptionalPasswordCredentials)());
     }
     setupHandlers() {
-        this.server.setRequestHandler(types_js_1.ListToolsRequestSchema, async () => ({
+        this.server.setRequestHandler("tools/list", async () => ({
             tools: TOOLS,
         }));
-        this.server.setRequestHandler(types_js_1.CallToolRequestSchema, async (request) => {
+        this.server.setRequestHandler("tools/call", async (request) => {
             const { name, arguments: args } = request.params;
             try {
                 if (!AUTH_TOOL_NAMES.has(name)) {
@@ -514,7 +507,7 @@ class HelloFreshMCPServer {
         }
     }
     async run() {
-        const transport = new stdio_js_1.StdioServerTransport();
+        const transport = new stdio_1.StdioServerTransport();
         await this.server.connect(transport);
         console.error("HelloFresh MCP server running on stdio");
         // Graceful shutdown

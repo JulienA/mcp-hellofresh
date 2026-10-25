@@ -24,7 +24,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) connector for 
 
 ## Requirements
 
-- Node.js 18+
+- Node.js 20+
 - A HelloFresh account (Google SSO or a HelloFresh password account)
 - Playwright Chromium (`npx playwright install chromium`)
 - **A display** for the first Google sign-in (`login` tool or `npm run login`)

@@ -1,12 +1,7 @@
 #!/usr/bin/env node
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-  Tool,
-} from "@modelcontextprotocol/sdk/types.js";
+import { Server, type Tool } from "@modelcontextprotocol/server";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
 import {
   formatAuthToolError,
@@ -21,7 +16,6 @@ const AUTH_TOOL_NAMES = new Set(["auth_status", "login", "logout"]);
 
 const GetMenuSchema = z.object({
   week_offset: z
-    .number()
     .int()
     .min(0)
     .max(4)
@@ -43,7 +37,6 @@ const SelectMealsSchema = z.object({
       z.object({
         recipe_id: z.string().describe("Recipe ID to select"),
         servings: z
-          .number()
           .int()
           .min(1)
           .max(6)
@@ -91,14 +84,12 @@ const UpdatePreferencesSchema = z.object({
 
 const ModifySubscriptionSchema = z.object({
   meals_per_week: z
-    .number()
     .int()
     .min(2)
     .max(5)
     .optional()
     .describe("Number of meals per week (2-5)"),
   servings_per_meal: z
-    .number()
     .int()
     .min(2)
     .max(4)
@@ -112,7 +103,6 @@ const ModifySubscriptionSchema = z.object({
 
 const GetPastOrdersSchema = z.object({
   limit: z
-    .number()
     .int()
     .min(1)
     .max(50)
@@ -124,7 +114,6 @@ const GetPastOrdersSchema = z.object({
 const RateRecipeSchema = z.object({
   recipe_id: z.string().describe("The recipe ID to rate"),
   rating: z
-    .number()
     .int()
     .min(1)
     .max(5)
@@ -174,7 +163,7 @@ const TOOLS: Tool[] = [
       type: "object",
       properties: {
         week_offset: {
-          type: "number",
+          type: "integer",
           description:
             "Week offset from current week (0 = current, 1 = next week, etc.)",
           default: 0,
@@ -218,7 +207,7 @@ const TOOLS: Tool[] = [
             properties: {
               recipe_id: { type: "string", description: "Recipe ID to select" },
               servings: {
-                type: "number",
+                type: "integer",
                 description: "Number of servings (optional)",
                 minimum: 1,
                 maximum: 6,
@@ -334,13 +323,13 @@ const TOOLS: Tool[] = [
       type: "object",
       properties: {
         meals_per_week: {
-          type: "number",
+          type: "integer",
           description: "Number of meals per week (2-5)",
           minimum: 2,
           maximum: 5,
         },
         servings_per_meal: {
-          type: "number",
+          type: "integer",
           description: "Number of servings per meal (2-4)",
           minimum: 2,
           maximum: 4,
@@ -361,7 +350,7 @@ const TOOLS: Tool[] = [
       type: "object",
       properties: {
         limit: {
-          type: "number",
+          type: "integer",
           description: "Maximum number of past orders to retrieve (default: 10, max: 50)",
           default: 10,
           minimum: 1,
@@ -382,7 +371,7 @@ const TOOLS: Tool[] = [
           description: "The recipe ID to rate",
         },
         rating: {
-          type: "number",
+          type: "integer",
           description: "Rating from 1 (poor) to 5 (excellent)",
           minimum: 1,
           maximum: 5,
@@ -418,11 +407,11 @@ class HelloFreshMCPServer {
   }
 
   private setupHandlers(): void {
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    this.server.setRequestHandler("tools/list", async () => ({
       tools: TOOLS,
     }));
 
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    this.server.setRequestHandler("tools/call", async (request) => {
       const { name, arguments: args } = request.params;
 
       try {
@@ -457,8 +446,8 @@ class HelloFreshMCPServer {
   private async handleTool(
     name: string,
     args: Record<string, unknown>
-  ): Promise<{ content: Array<{ type: string; text: string }> }> {
-    const text = (data: unknown): { content: Array<{ type: string; text: string }> } => ({
+  ): Promise<{ content: Array<{ type: "text"; text: string }> }> {
+    const text = (data: unknown): { content: Array<{ type: "text"; text: string }> } => ({
       content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
     });
 
