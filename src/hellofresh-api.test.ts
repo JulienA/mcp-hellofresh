@@ -820,6 +820,238 @@ describe("HelloFreshApi.getRecipeImage", () => {
   });
 });
 
+describe("HelloFreshApi menu calories, allergens, and tags", () => {
+  beforeEach(() => {
+    clearRecipeDetailsCache();
+  });
+
+  function recipeFetches(calls: Call[]): Call[] {
+    return calls.filter((call) => call.url.includes("/recipes/recipes/"));
+  }
+
+  function menuClient(handler: (call: Call) => Response | undefined, country = "fr") {
+    const { fetchImpl, calls } = recorded(
+      (call) => handler(call) ?? okAccount(call) ?? Response.json({}, { status: 404 })
+    );
+    const api = new HelloFreshApi(stored("access", Math.floor(Date.now() / 1000), 1800, country), fetchImpl);
+    return { api, calls };
+  }
+
+  function menuWith(meals: unknown[]) {
+    return (call: Call): Response | undefined => {
+      if (call.url.includes("/my-deliveries/menu")) {
+        return Response.json({ week: WEEK, meals });
+      }
+      return undefined;
+    };
+  }
+
+  const duckAllergens = [
+    { name: "Blé ", type: "wheat", tracesOf: false },
+    { name: "Gluten", type: "gluten", tracesOf: false },
+    { name: "Lait (contient du lactose)", type: "milk", tracesOf: false },
+    { name: "Moutarde", type: "traces-of-mustard", tracesOf: true },
+    { name: "Soja", type: "traces-of-soya", tracesOf: true },
+    {
+      name: "Peut contenir des traces d'allergènes",
+      type: "maycontaintracesofallergens",
+      slug: "peut-contenir-des-traces-dallergenes",
+      tracesOf: true,
+      triggersTracesOf: true,
+    },
+  ];
+
+  it("reads calories and allergens from the menu without opening recipes", async () => {
+    const { api, calls } = menuClient(
+      menuWith([
+        {
+          index: 1,
+          recipe: {
+            id: "kcalarray",
+            name: "Canard",
+            headline: "penne",
+            nutrition: [
+              { name: "Énergie (kJ)", amount: 4422, unit: "kJ" },
+              { name: "Énergie (kcal)", amount: 1057, unit: "kcal" },
+            ],
+            allergens: duckAllergens,
+          },
+        },
+        {
+          index: 2,
+          recipe: {
+            id: "kcalobject",
+            name: "Soupe",
+            nutrition: { calories: 420, energy: 1800 },
+            allergens: [],
+          },
+        },
+      ])
+    );
+    const menu = await api.getMenu(0);
+    const duck = menu.recipes.find((recipe) => recipe.id === "kcalarray");
+    const soup = menu.recipes.find((recipe) => recipe.id === "kcalobject");
+    assert.equal(duck?.calories, 1057);
+    assert.deepEqual(duck?.allergens, ["Blé", "Gluten", "Lait (contient du lactose)"]);
+    assert.deepEqual(duck?.allergenTraces, ["Moutarde", "Soja"]);
+    assert.equal(soup?.calories, 420);
+    assert.deepEqual(soup?.allergens, []);
+    assert.deepEqual(soup?.allergenTraces, []);
+    assert.equal(recipeFetches(calls).length, 0);
+  });
+
+  it("loads missing calories and allergens from the recipe cache", async () => {
+    const recipeFor = (call: Call): Response | undefined => {
+      if (!call.url.includes("/recipes/recipes/")) {
+        return undefined;
+      }
+      const id = new URL(call.url).pathname.split("/").pop();
+      if (id === "mealfull") {
+        return Response.json({
+          id,
+          nutrition: [{ name: "Énergie (kcal)", amount: 1057, unit: "kcal" }],
+          allergens: duckAllergens,
+        });
+      }
+      if (id === "mealmiss") {
+        return Response.json({ message: "down" }, { status: 500 });
+      }
+      return undefined;
+    };
+    const { api, calls } = menuClient((call) => {
+      return (
+        recipeFor(call) ??
+        menuWith([
+          { index: 1, recipe: { id: "mealfull", name: "Canard" } },
+          { index: 2, recipe: { id: "mealmiss", name: "Soupe" } },
+        ])(call)
+      );
+    });
+    const first = await api.getMenu(0);
+    assert.equal(first.recipes.find((recipe) => recipe.id === "mealfull")?.calories, 1057);
+    assert.deepEqual(first.recipes.find((recipe) => recipe.id === "mealfull")?.allergens, [
+      "Blé",
+      "Gluten",
+      "Lait (contient du lactose)",
+    ]);
+    assert.deepEqual(first.recipes.find((recipe) => recipe.id === "mealfull")?.allergenTraces, ["Moutarde", "Soja"]);
+    const missing = first.recipes.find((recipe) => recipe.id === "mealmiss");
+    assert.equal(missing?.calories, null);
+    assert.deepEqual(missing?.allergens, []);
+    assert.deepEqual(missing?.allergenTraces, []);
+    assert.equal(first.recipes.find((recipe) => recipe.id === "mealfull")?.name, "Canard");
+
+    const second = await api.getMenu(0);
+    assert.equal(second.recipes.find((recipe) => recipe.id === "mealfull")?.calories, 1057);
+    const fetches = recipeFetches(calls).map((call) => new URL(call.url).pathname.split("/").pop());
+    assert.deepEqual(fetches.filter((id) => id === "mealfull"), ["mealfull"]);
+    assert.deepEqual(fetches.filter((id) => id === "mealmiss"), ["mealmiss", "mealmiss"]);
+  });
+
+  it("stops opening recipes after HelloFresh rate limits", async () => {
+    const meals = ["rate0", "rate1", "rate2", "rate3", "rate4", "rate5"].map((id, index) => ({
+      index,
+      recipe: { id, name: id },
+    }));
+    const { api, calls } = menuClient((call) => {
+      if (call.url.includes("/recipes/recipes/")) {
+        const id = new URL(call.url).pathname.split("/").pop();
+        if (id === "rate0") {
+          return Response.json({ message: "slow down" }, { status: 429 });
+        }
+        return Response.json({
+          id,
+          nutrition: [{ name: "Énergie (kcal)", amount: 300, unit: "kcal" }],
+          allergens: [{ name: "Gluten", tracesOf: false }],
+        });
+      }
+      return menuWith(meals)(call);
+    });
+    const menu = await api.getMenu(0);
+    assert.equal(menu.recipes.length, 6);
+    const fetched = recipeFetches(calls).map((call) => new URL(call.url).pathname.split("/").pop());
+    assert.deepEqual(fetched, ["rate0", "rate1", "rate2", "rate3"]);
+    assert.equal(menu.recipes.find((recipe) => recipe.id === "rate0")?.calories, null);
+    assert.equal(menu.recipes.find((recipe) => recipe.id === "rate1")?.calories, 300);
+    assert.deepEqual(menu.recipes.find((recipe) => recipe.id === "rate1")?.allergens, ["Gluten"]);
+    assert.equal(menu.recipes.find((recipe) => recipe.id === "rate4")?.calories, null);
+    assert.equal(menu.recipes.find((recipe) => recipe.id === "rate5")?.calories, null);
+  });
+
+  it("translates menu slugs and drops internal tags", async () => {
+    const slugLabels = [
+      ["pork-free", "Sans porc", "Pork-free"],
+      ["classic-plates", "Assiettes classiques", "Classic plates"],
+      ["regional-specialty", "Spécialité régionale", "Regional specialty"],
+      ["new", "Nouveau", "New"],
+      ["handhelds", "À la main", "Handhelds"],
+      ["winter-warmers", "Plats d'hiver", "Winter warmers"],
+      ["certified-product", "Produit certifié", "Certified product"],
+      ["dinner-bowls", "Bowls", "Dinner bowls"],
+      ["premium-ingredient", "Ingrédient premium", "Premium ingredient"],
+      ["world-flavors", "Saveurs du monde", "World flavors"],
+      ["culinary-technique", "Technique culinaire", "Culinary technique"],
+    ] as const;
+    const tagged = {
+      nutrition: { calories: 100 },
+      allergens: [],
+    };
+    const meals = [
+      {
+        index: 1,
+        recipe: {
+          id: "mealtags",
+          name: "Canard",
+          ...tagged,
+          tags: [
+            { name: "ineligible-reco", type: "ineligible-for-recommendation", slug: "ineligible-reco" },
+            { name: "premium-ptn-variety", type: "premium-ptn-variety" },
+            ...slugLabels.map(([slug]) => ({ name: slug, type: slug })),
+            { name: "Épicé", type: "spicy" },
+            { name: "mystery-slug", type: "mystery-slug" },
+          ],
+        },
+      },
+      {
+        index: 2,
+        recipe: {
+          id: "mealveggie",
+          name: "Soupe",
+          label: { text: "Rapide", displayLabel: true },
+          ...tagged,
+          tags: [
+            { name: "Rapide", type: "quick", displayLabel: true },
+            { name: "Veggie", type: "veggie", displayLabel: true },
+            { name: "pork-free", type: "pork-free", displayLabel: false },
+          ],
+        },
+      },
+      {
+        index: 3,
+        recipe: {
+          id: "mealslug",
+          name: "Riz",
+          ...tagged,
+          tags: [{ name: "unknown-handle", type: "unknown-handle", displayLabel: true }],
+        },
+      },
+    ];
+    const french = await menuClient(menuWith(meals), "fr").api.getMenu(0);
+    assert.deepEqual(french.recipes.find((recipe) => recipe.id === "mealtags")?.tags, [
+      ...slugLabels.map(([, fr]) => fr),
+      "Épicé",
+    ]);
+    assert.deepEqual(french.recipes.find((recipe) => recipe.id === "mealveggie")?.tags, ["Veggie"]);
+    assert.deepEqual(french.recipes.find((recipe) => recipe.id === "mealslug")?.tags, ["unknown-handle"]);
+
+    const english = await menuClient(menuWith(meals), "us").api.getMenu(0);
+    assert.deepEqual(english.recipes.find((recipe) => recipe.id === "mealtags")?.tags, [
+      ...slugLabels.map(([, , en]) => en),
+      "Épicé",
+    ]);
+  });
+});
+
 const RECIPE_A = "6a72e7f4ebec54be3cd9b330";
 const RECIPE_B = "6a72e7f4ebec54be3cd9b331";
 

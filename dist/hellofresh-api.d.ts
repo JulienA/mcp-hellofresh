@@ -21,6 +21,12 @@ export interface RecipeSummary {
     /** Card badge, such as "Rapide". Omitted when there is none. */
     label?: string;
     tags: string[];
+    /** kcal per portion, or null when HelloFresh did not send one. */
+    calories: number | null;
+    /** Allergens in the recipe. Traces are listed separately. */
+    allergens: string[];
+    /** Allergens present only as traces. The generic traces banner is omitted. */
+    allergenTraces: string[];
     index?: number;
 }
 export interface RecipeImage {
@@ -119,6 +125,7 @@ export declare class HelloFreshApi {
     private primarySubscription;
     private selectedMealsForWeek;
     private recipesForWeek;
+    private enrichMenuNutrition;
     private patchDeliveryStatus;
     private deliveryOptions;
     private cartProductSku;
