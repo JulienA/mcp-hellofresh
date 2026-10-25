@@ -1,3 +1,4 @@
+import { LRUCache } from "lru-cache";
 import { AsyncMutex } from "./auth.js";
 import {
   emailFromClaims,
@@ -50,50 +51,31 @@ const MAX_RECIPE_IMAGE_BYTES = 2 * 1024 * 1024;
 export const RECIPE_DETAILS_TTL_MS = 30 * 60 * 1000;
 const RECIPE_DETAILS_CACHE_MAX = 256;
 
-interface CachedRecipeDetails {
-  expiresAt: number;
-  payload: Record<string, unknown>;
+interface RecipeDetailsContext {
+  load: () => Promise<Record<string, unknown>>;
 }
 
-const recipeDetailsCache = new Map<string, CachedRecipeDetails>();
-const recipeDetailsInFlight = new Map<string, Promise<Record<string, unknown>>>();
+const recipeDetailsCache = new LRUCache<string, Record<string, unknown>, RecipeDetailsContext>({
+  max: RECIPE_DETAILS_CACHE_MAX,
+  ttl: RECIPE_DETAILS_TTL_MS,
+  // Date.now(), not performance.now(), so tests can expire entries with mock.timers.
+  // ttlResolution 0 reads that clock on every lookup instead of caching it for 1ms.
+  perf: { now: () => Date.now() },
+  ttlResolution: 0,
+  fetchMethod: async (_key, _stale, { context }) => {
+    if (!context) {
+      throw new HelloFreshApiError("api", "A recipe id is required.");
+    }
+    return structuredClone(await context.load());
+  },
+});
 
 export function clearRecipeDetailsCache(): void {
   recipeDetailsCache.clear();
-  recipeDetailsInFlight.clear();
 }
 
 function recipeDetailsKey(country: HelloFreshCountry, recipeId: string): string {
   return `${country.apiCountry}\0${country.locale}\0${recipeId}`;
-}
-
-function readRecipeDetails(key: string): Record<string, unknown> | undefined {
-  const hit = recipeDetailsCache.get(key);
-  if (!hit) {
-    return undefined;
-  }
-  if (hit.expiresAt <= Date.now()) {
-    recipeDetailsCache.delete(key);
-    return undefined;
-  }
-  recipeDetailsCache.delete(key);
-  recipeDetailsCache.set(key, hit);
-  return structuredClone(hit.payload);
-}
-
-function storeRecipeDetails(key: string, payload: Record<string, unknown>): void {
-  recipeDetailsCache.delete(key);
-  recipeDetailsCache.set(key, {
-    expiresAt: Date.now() + RECIPE_DETAILS_TTL_MS,
-    payload: structuredClone(payload),
-  });
-  while (recipeDetailsCache.size > RECIPE_DETAILS_CACHE_MAX) {
-    const oldest = recipeDetailsCache.keys().next().value;
-    if (oldest === undefined) {
-      break;
-    }
-    recipeDetailsCache.delete(oldest);
-  }
 }
 
 export interface RecipeSummary {
@@ -331,26 +313,13 @@ export class HelloFreshApi {
       throw new HelloFreshApiError("api", "A recipe id is required.");
     }
     const key = recipeDetailsKey(this.country, bare);
-    const cached = readRecipeDetails(key);
-    if (cached) {
-      return cached;
+    const payload = await recipeDetailsCache.fetch(key, {
+      context: { load: () => this.fetchRecipe(bare) },
+    });
+    if (!payload) {
+      throw new HelloFreshApiError("api", "HelloFresh did not return this recipe.");
     }
-    let flight = recipeDetailsInFlight.get(key);
-    if (!flight) {
-      flight = this.fetchRecipe(bare).then((payload) => {
-        storeRecipeDetails(key, payload);
-        return payload;
-      });
-      recipeDetailsInFlight.set(key, flight);
-      void flight
-        .finally(() => {
-          if (recipeDetailsInFlight.get(key) === flight) {
-            recipeDetailsInFlight.delete(key);
-          }
-        })
-        .catch(() => undefined);
-    }
-    return structuredClone(await flight);
+    return structuredClone(payload);
   }
 
   private async fetchRecipe(bare: string): Promise<Record<string, unknown>> {

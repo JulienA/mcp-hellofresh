@@ -985,7 +985,8 @@ describe("HelloFreshApi recipe details cache", () => {
       assert.equal((await api.getRecipe(RECIPE_A)).name, "Tacos 1");
       mock.timers.tick(RECIPE_DETAILS_TTL_MS - 1);
       assert.equal((await api.getRecipe(RECIPE_A)).name, "Tacos 1");
-      mock.timers.tick(1);
+      // lru-cache keeps an entry while its age is less than or equal to ttl.
+      mock.timers.tick(2);
       assert.equal((await api.getRecipe(RECIPE_A)).name, "Tacos 2");
       assert.equal(recipeCalls(calls).length, 2);
     } finally {
