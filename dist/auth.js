@@ -5,16 +5,17 @@
  * Primary path: Google SSO via "Continue with Google". Google sign-in
  * is completed by the user in an interactive browser; this process must never
  * collect, store, or automate Google credentials. Playwright storageState
- * (HelloFresh cookies) is the session artifact — wired in a later step.
+ * (HelloFresh cookies) is the session artifact. Google cookies are filtered out.
  *
  * Optional fallback: HelloFresh email/password env vars for non-SSO accounts.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.AsyncMutex = exports.AuthError = exports.MISSING_SESSION_MESSAGE = void 0;
+exports.AsyncMutex = exports.AuthError = exports.LOGIN_WINDOW_MESSAGE = exports.MISSING_SESSION_MESSAGE = void 0;
 exports.toAuthError = toAuthError;
 exports.formatAuthToolError = formatAuthToolError;
 exports.readOptionalPasswordCredentials = readOptionalPasswordCredentials;
-exports.MISSING_SESSION_MESSAGE = "Session expired, run login again. HelloFresh Google SSO cannot be automated; complete Continue with Google in an interactive window so the session can be reused. Do not store Google credentials. Optional fallback for password accounts: HELLOFRESH_EMAIL and HELLOFRESH_PASSWORD.";
+exports.MISSING_SESSION_MESSAGE = "Session expired, run login again. Call the login tool (needs a display) or run `npm run login` and complete Continue with Google in the headed window. Do not store Google credentials. Optional fallback for password accounts: HELLOFRESH_EMAIL and HELLOFRESH_PASSWORD.";
+exports.LOGIN_WINDOW_MESSAGE = "A headed Chromium window is open on the HelloFresh login page. Complete Continue with Google there. Do not type a Google password into this chat or into any MCP prompt.";
 class AuthError extends Error {
     code;
     constructor(code, message, options) {

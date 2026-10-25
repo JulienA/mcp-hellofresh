@@ -3,8 +3,20 @@ import {
   AsyncMutex,
   AuthError,
   MISSING_SESSION_MESSAGE,
+  readOptionalPasswordCredentials,
   toAuthError,
 } from "./auth.js";
+import {
+  deletePersistedSession,
+  filterHelloFreshStorageState,
+  helloFreshCookiesAreValid,
+  isHelloFreshLoggedInUrl,
+  loadPersistedSession,
+  resolveSessionPath,
+  savePersistedSession,
+  toPlaywrightStorageState,
+  type PlaywrightStorageState,
+} from "./session.js";
 
 export interface HelloFreshCredentials {
   email: string;
@@ -12,8 +24,46 @@ export interface HelloFreshCredentials {
 }
 
 export interface HelloFreshBrowserOptions {
-  /** Injected in tests. Production launches headed-capable Chromium via Playwright. */
+  /** Injected in tests. Production launches headless Chromium via Playwright. */
   launch?: () => Promise<Browser>;
+  /** Headed Chromium for interactive Google SSO. Requires a display. */
+  launchHeaded?: () => Promise<Browser>;
+  /** Override session file path (tests / HELLOFRESH_SESSION_PATH). */
+  sessionPath?: string;
+  /** How long interactive Google SSO may take. */
+  loginTimeoutMs?: number;
+  /** Poll interval while waiting for Google SSO (tests). */
+  loginPollMs?: number;
+}
+
+export interface AuthStatus {
+  authenticated: boolean;
+  browserOpen: boolean;
+  passwordFallbackConfigured: boolean;
+  session: {
+    exists: boolean;
+    path: string;
+    savedAt: string | null;
+    helloFreshCookieCount: number;
+    valid: boolean;
+  };
+}
+
+const DEFAULT_LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
+const LOGIN_POLL_MS = 500;
+const PROBE_TIMEOUT_MS = 15_000;
+
+const DEFAULT_CONTEXT_OPTIONS = {
+  userAgent:
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  viewport: { width: 1280, height: 720 },
+};
+
+function launchChromium(headless: boolean): Promise<Browser> {
+  return chromium.launch({
+    headless,
+    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+  });
 }
 
 export interface Recipe {
@@ -107,15 +157,23 @@ export class HelloFreshBrowser {
   private readonly baseUrl = "https://www.hellofresh.com";
   private readonly mutex = new AsyncMutex();
   private readonly launchFn: () => Promise<Browser>;
+  private readonly launchHeadedFn: () => Promise<Browser>;
+  private readonly sessionPathOverride?: string;
+  private readonly loginTimeoutMs: number;
+  private readonly loginPollMs: number;
 
-  constructor(options: HelloFreshBrowserOptions = {}) {
-    this.launchFn =
-      options.launch ??
-      (() =>
-        chromium.launch({
-          headless: true,
-          args: ["--no-sandbox", "--disable-setuid-sandbox"],
-        }));
+  constructor(private readonly options: HelloFreshBrowserOptions = {}) {
+    this.launchFn = options.launch ?? (() => launchChromium(true));
+    this.launchHeadedFn = options.launchHeaded ?? (() => launchChromium(false));
+    this.sessionPathOverride = options.sessionPath;
+    this.loginTimeoutMs =
+      options.loginTimeoutMs ??
+      (Number(process.env.HELLOFRESH_LOGIN_TIMEOUT_MS) || DEFAULT_LOGIN_TIMEOUT_MS);
+    this.loginPollMs = options.loginPollMs ?? LOGIN_POLL_MS;
+  }
+
+  sessionFilePath(): string {
+    return resolveSessionPath(process.env, this.sessionPathOverride);
   }
 
   /** True when a Playwright browser is currently open (tests / diagnostics). */
@@ -135,20 +193,13 @@ export class HelloFreshBrowser {
   }
 
   /**
-   * Session entry point: optional password fallback only.
-   * Google SSO credentials must never be passed here — interactive login is a later step.
+   * Restore a saved HelloFresh session (probe + at most one password relogin).
+   * Google SSO is never retried here — use interactiveLogin() for that.
    */
   async ensureReady(credentials?: HelloFreshCredentials): Promise<void> {
     await this.mutex.runExclusive(async () => {
-      if (this.isLoggedIn) {
-        return;
-      }
-      if (!credentials) {
-        throw AuthError.missingSession();
-      }
       try {
-        await this.initUnlocked();
-        await this.loginUnlocked(credentials);
+        await this.ensureReadyUnlocked(credentials);
       } catch (error) {
         await this.closeUnlocked();
         throw toAuthError(error);
@@ -159,10 +210,7 @@ export class HelloFreshBrowser {
   async login(credentials: HelloFreshCredentials): Promise<void> {
     await this.mutex.runExclusive(async () => {
       try {
-        if (!this.page) {
-          await this.initUnlocked();
-        }
-        await this.loginUnlocked(credentials);
+        await this.passwordLoginAndSaveUnlocked(credentials);
       } catch (error) {
         await this.closeUnlocked();
         throw toAuthError(error);
@@ -170,15 +218,175 @@ export class HelloFreshBrowser {
     });
   }
 
-  private async initUnlocked(): Promise<void> {
+  /**
+   * Opens headed Chromium on the HelloFresh login page. The user completes
+   * Continue with Google. Requires a display. Never collects Google secrets.
+   */
+  async interactiveLogin(): Promise<{ path: string; savedAt: string }> {
+    return this.mutex.runExclusive(async () => {
+      try {
+        return await this.interactiveLoginUnlocked();
+      } catch (error) {
+        await this.closeUnlocked();
+        throw toAuthError(error);
+      }
+    });
+  }
+
+  async logout(): Promise<void> {
+    await this.mutex.runExclusive(async () => {
+      await this.closeUnlocked();
+      await deletePersistedSession(this.sessionFilePath());
+    });
+  }
+
+  async getAuthStatus(): Promise<AuthStatus> {
+    const path = this.sessionFilePath();
+    const persisted = await loadPersistedSession(path);
+    const cookieCount = persisted?.storageState.cookies.length ?? 0;
+    const valid = persisted
+      ? helloFreshCookiesAreValid(persisted.storageState)
+      : false;
+    return {
+      authenticated: this.isLoggedIn || valid,
+      browserOpen: this.hasActiveBrowser(),
+      passwordFallbackConfigured: Boolean(readOptionalPasswordCredentials()),
+      session: {
+        exists: Boolean(persisted),
+        path,
+        savedAt: persisted?.savedAt ?? null,
+        helloFreshCookieCount: cookieCount,
+        valid,
+      },
+    };
+  }
+
+  private async ensureReadyUnlocked(
+    credentials?: HelloFreshCredentials
+  ): Promise<void> {
+    if (this.page && this.isLoggedIn && (await this.probeUnlocked())) {
+      return;
+    }
+    this.isLoggedIn = false;
+
+    const persisted = await loadPersistedSession(this.sessionFilePath());
+    if (persisted) {
+      await this.initUnlocked(persisted.storageState);
+      if (await this.probeUnlocked()) {
+        this.isLoggedIn = true;
+        return;
+      }
+      await this.closeUnlocked();
+      if (credentials) {
+        await this.passwordLoginAndSaveUnlocked(credentials);
+        return;
+      }
+      throw AuthError.expired();
+    }
+
+    if (credentials) {
+      await this.passwordLoginAndSaveUnlocked(credentials);
+      return;
+    }
+
+    throw AuthError.missingSession();
+  }
+
+  private async passwordLoginAndSaveUnlocked(
+    credentials: HelloFreshCredentials
+  ): Promise<void> {
+    await this.initUnlocked();
+    await this.loginUnlocked(credentials);
+    await this.saveSessionUnlocked();
+  }
+
+  private async interactiveLoginUnlocked(): Promise<{ path: string; savedAt: string }> {
+    await this.initUnlocked(undefined, true);
+    const page = this.page;
+    if (!page) {
+      throw AuthError.loginFailed("Browser page is not initialized");
+    }
+
+    await page.goto(`${this.baseUrl}/login`, {
+      waitUntil: "domcontentloaded",
+      timeout: PROBE_TIMEOUT_MS,
+    });
+    await this.dismissCookieBanner(page);
+
+    const deadline = Date.now() + this.loginTimeoutMs;
+    while (Date.now() < deadline) {
+      if (isHelloFreshLoggedInUrl(page.url())) {
+        break;
+      }
+      await page.waitForTimeout(this.loginPollMs);
+    }
+
+    if (!isHelloFreshLoggedInUrl(page.url())) {
+      throw AuthError.loginFailed(
+        `Timed out after ${this.loginTimeoutMs}ms waiting for HelloFresh Google SSO. ${MISSING_SESSION_MESSAGE}`
+      );
+    }
+
+    this.isLoggedIn = true;
+    const saved = await this.saveSessionUnlocked();
     await this.closeUnlocked();
-    this.browser = await this.launchFn();
+    return { path: this.sessionFilePath(), savedAt: saved.savedAt };
+  }
+
+  private async initUnlocked(
+    storageState?: PlaywrightStorageState,
+    headed = false
+  ): Promise<void> {
+    await this.closeUnlocked();
+    this.browser = headed ? await this.launchHeadedFn() : await this.launchFn();
     this.context = await this.browser.newContext({
-      userAgent:
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      viewport: { width: 1280, height: 720 },
+      ...DEFAULT_CONTEXT_OPTIONS,
+      ...(storageState ? { storageState: toPlaywrightStorageState(storageState) } : {}),
     });
     this.page = await this.context.newPage();
+  }
+
+  private async probeUnlocked(): Promise<boolean> {
+    const page = this.page;
+    if (!page) {
+      return false;
+    }
+    try {
+      await page.goto(`${this.baseUrl}/my-account`, {
+        waitUntil: "domcontentloaded",
+        timeout: PROBE_TIMEOUT_MS,
+      });
+    } catch {
+      // Still inspect whatever URL we landed on.
+    }
+    return isHelloFreshLoggedInUrl(page.url());
+  }
+
+  private async saveSessionUnlocked() {
+    if (!this.context) {
+      throw AuthError.loginFailed("Cannot save session without a browser context");
+    }
+    const raw = await this.context.storageState();
+    const filtered = filterHelloFreshStorageState(raw);
+    if (filtered.cookies.length === 0) {
+      throw AuthError.loginFailed(
+        "Login succeeded but no HelloFresh cookies were present to persist"
+      );
+    }
+    return savePersistedSession(this.sessionFilePath(), filtered);
+  }
+
+  private async dismissCookieBanner(page: Page): Promise<void> {
+    try {
+      const cookieBtn = page.locator(
+        '[data-testid="cookie-consent-accept"], button:has-text("Accept All"), button:has-text("Accept Cookies")'
+      );
+      if (await cookieBtn.isVisible({ timeout: 3000 })) {
+        await cookieBtn.first().click();
+      }
+    } catch {
+      // Cookie banner not present
+    }
   }
 
   private async loginUnlocked(credentials: HelloFreshCredentials): Promise<void> {
@@ -190,18 +398,7 @@ export class HelloFreshBrowser {
 
     await page.goto(`${this.baseUrl}/login`);
     await page.waitForLoadState("networkidle");
-
-    // Handle cookie consent if present
-    try {
-      const cookieBtn = page.locator(
-        '[data-testid="cookie-consent-accept"], button:has-text("Accept All"), button:has-text("Accept Cookies")'
-      );
-      if (await cookieBtn.isVisible({ timeout: 3000 })) {
-        await cookieBtn.first().click();
-      }
-    } catch {
-      // Cookie banner not present
-    }
+    await this.dismissCookieBanner(page);
 
     // Optional password-account fallback. Never used for Google SSO.
     const emailInput = page.locator(
@@ -222,10 +419,7 @@ export class HelloFreshBrowser {
     await page.waitForLoadState("networkidle");
 
     const currentUrl = page.url();
-    if (
-      currentUrl.includes("/login") &&
-      !currentUrl.includes("/login/success")
-    ) {
+    if (!isHelloFreshLoggedInUrl(currentUrl)) {
       const errorMsg = await page
         .locator('[data-testid="error-message"], .error-message, [role="alert"]')
         .textContent()
@@ -308,9 +502,17 @@ export class HelloFreshBrowser {
           const resp = await fetch(`${baseUrl}/api/menus/current`, {
             credentials: "include",
           });
+          if (resp.status === 401 || resp.status === 403) {
+            return { authExpired: true as const };
+          }
           if (resp.ok) return resp.json();
           return null;
         }, this.baseUrl);
+
+        if (apiData?.authExpired) {
+          this.isLoggedIn = false;
+          throw AuthError.expired();
+        }
 
         if (apiData?.recipes) {
           return this.parseApiRecipes(apiData.recipes);

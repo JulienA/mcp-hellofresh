@@ -7,6 +7,7 @@ const types_js_1 = require("@modelcontextprotocol/sdk/types.js");
 const zod_1 = require("zod");
 const auth_js_1 = require("./auth.js");
 const browser_js_1 = require("./browser.js");
+const AUTH_TOOL_NAMES = new Set(["auth_status", "login", "logout"]);
 // ─── Schemas ──────────────────────────────────────────────────────────────────
 const GetMenuSchema = zod_1.z.object({
     week_offset: zod_1.z
@@ -116,6 +117,30 @@ const RateRecipeSchema = zod_1.z.object({
 });
 // ─── Tool Definitions ─────────────────────────────────────────────────────────
 const TOOLS = [
+    {
+        name: "auth_status",
+        description: "Show whether a HelloFresh session file exists, whether its cookies look valid, and when it was saved. Does not return cookie values. Google SSO users should run login if valid is false.",
+        inputSchema: {
+            type: "object",
+            properties: {},
+        },
+    },
+    {
+        name: "login",
+        description: "Open a headed Chromium window on the HelloFresh login page so you can complete Continue with Google yourself. Requires a display. Times out if sign-in is not finished. Never send Google passwords to this tool. If the MCP client cannot show a browser, run `npm run login` instead.",
+        inputSchema: {
+            type: "object",
+            properties: {},
+        },
+    },
+    {
+        name: "logout",
+        description: "Delete the saved HelloFresh session file and close the browser. Does not sign you out of Google.",
+        inputSchema: {
+            type: "object",
+            properties: {},
+        },
+    },
     {
         name: "get_menu",
         description: "Get the current week's available recipes/meals from HelloFresh. Optionally specify a week offset to see future menus.",
@@ -353,7 +378,9 @@ class HelloFreshMCPServer {
         this.server.setRequestHandler(types_js_1.CallToolRequestSchema, async (request) => {
             const { name, arguments: args } = request.params;
             try {
-                await this.ensureInitialized();
+                if (!AUTH_TOOL_NAMES.has(name)) {
+                    await this.ensureInitialized();
+                }
                 return await this.handleTool(name, args ?? {});
             }
             catch (error) {
@@ -361,11 +388,50 @@ class HelloFreshMCPServer {
             }
         });
     }
+    async notifyLoginWindow() {
+        if (!this.server.getClientCapabilities()?.elicitation) {
+            return;
+        }
+        try {
+            await this.server.elicitInput({
+                mode: "form",
+                message: auth_js_1.LOGIN_WINDOW_MESSAGE,
+                requestedSchema: {
+                    type: "object",
+                    properties: {},
+                },
+            });
+        }
+        catch {
+            // Client declined, timed out, or does not implement forms — login still proceeds.
+        }
+    }
     async handleTool(name, args) {
         const text = (data) => ({
             content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
         });
         switch (name) {
+            case "auth_status": {
+                const status = await this.hellofresh.getAuthStatus();
+                return text(status);
+            }
+            case "login": {
+                void this.notifyLoginWindow();
+                const result = await this.hellofresh.interactiveLogin();
+                return text({
+                    ok: true,
+                    message: "HelloFresh session saved. Complete Google SSO is done; cookie values are not returned.",
+                    session_path: result.path,
+                    saved_at: result.savedAt,
+                });
+            }
+            case "logout": {
+                await this.hellofresh.logout();
+                return text({
+                    ok: true,
+                    message: "HelloFresh session deleted and browser closed.",
+                });
+            }
             case "get_menu": {
                 const params = GetMenuSchema.parse(args);
                 const menu = await this.hellofresh.getMenu(params.week_offset);

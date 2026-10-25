@@ -10,9 +10,12 @@ import {
 import { z } from "zod";
 import {
   formatAuthToolError,
+  LOGIN_WINDOW_MESSAGE,
   readOptionalPasswordCredentials,
 } from "./auth.js";
 import { HelloFreshBrowser } from "./browser.js";
+
+const AUTH_TOOL_NAMES = new Set(["auth_status", "login", "logout"]);
 
 // ─── Schemas ──────────────────────────────────────────────────────────────────
 
@@ -136,6 +139,33 @@ const RateRecipeSchema = z.object({
 // ─── Tool Definitions ─────────────────────────────────────────────────────────
 
 const TOOLS: Tool[] = [
+  {
+    name: "auth_status",
+    description:
+      "Show whether a HelloFresh session file exists, whether its cookies look valid, and when it was saved. Does not return cookie values. Google SSO users should run login if valid is false.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+  },
+  {
+    name: "login",
+    description:
+      "Open a headed Chromium window on the HelloFresh login page so you can complete Continue with Google yourself. Requires a display. Times out if sign-in is not finished. Never send Google passwords to this tool. If the MCP client cannot show a browser, run `npm run login` instead.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+  },
+  {
+    name: "logout",
+    description:
+      "Delete the saved HelloFresh session file and close the browser. Does not sign you out of Google.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+  },
   {
     name: "get_menu",
     description:
@@ -396,12 +426,32 @@ class HelloFreshMCPServer {
       const { name, arguments: args } = request.params;
 
       try {
-        await this.ensureInitialized();
+        if (!AUTH_TOOL_NAMES.has(name)) {
+          await this.ensureInitialized();
+        }
         return await this.handleTool(name, args ?? {});
       } catch (error) {
         return formatAuthToolError(error);
       }
     });
+  }
+
+  private async notifyLoginWindow(): Promise<void> {
+    if (!this.server.getClientCapabilities()?.elicitation) {
+      return;
+    }
+    try {
+      await this.server.elicitInput({
+        mode: "form",
+        message: LOGIN_WINDOW_MESSAGE,
+        requestedSchema: {
+          type: "object",
+          properties: {},
+        },
+      });
+    } catch {
+      // Client declined, timed out, or does not implement forms — login still proceeds.
+    }
   }
 
   private async handleTool(
@@ -413,6 +463,31 @@ class HelloFreshMCPServer {
     });
 
     switch (name) {
+      case "auth_status": {
+        const status = await this.hellofresh.getAuthStatus();
+        return text(status);
+      }
+
+      case "login": {
+        void this.notifyLoginWindow();
+        const result = await this.hellofresh.interactiveLogin();
+        return text({
+          ok: true,
+          message:
+            "HelloFresh session saved. Complete Google SSO is done; cookie values are not returned.",
+          session_path: result.path,
+          saved_at: result.savedAt,
+        });
+      }
+
+      case "logout": {
+        await this.hellofresh.logout();
+        return text({
+          ok: true,
+          message: "HelloFresh session deleted and browser closed.",
+        });
+      }
+
       case "get_menu": {
         const params = GetMenuSchema.parse(args);
         const menu = await this.hellofresh.getMenu(params.week_offset);
