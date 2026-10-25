@@ -42,6 +42,10 @@ export const RATE_RECIPE_UNSUPPORTED =
 const USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
+const RECIPE_IMAGE_CDN_PREFIX =
+  "https://img.hellofresh.com/w_800,c_limit,f_jpg,q_auto,fl_lossy/hellofresh_s3";
+const MAX_RECIPE_IMAGE_BYTES = 2 * 1024 * 1024;
+
 export interface RecipeSummary {
   id: string;
   name: string;
@@ -50,6 +54,14 @@ export interface RecipeSummary {
   prepTime: number;
   tags: string[];
   index?: number;
+}
+
+export interface RecipeImage {
+  recipeId: string;
+  name?: string;
+  url: string;
+  mimeType: string;
+  data: string;
 }
 
 export interface AccountStatus {
@@ -242,17 +254,70 @@ export class HelloFreshApi {
   }
 
   async getRecipe(recipeId: string): Promise<Record<string, unknown>> {
+    return this.mutex.runExclusive(() => this.loadRecipe(recipeId));
+  }
+
+  async getRecipeImage(recipeId: string): Promise<RecipeImage> {
     return this.mutex.runExclusive(async () => {
-      const bare = recipeId.split("-", 1)[0]?.trim();
-      if (!bare) {
-        throw new HelloFreshApiError("api", "A recipe id is required.");
-      }
-      const payload = await this.getJson(`/gw/recipes/recipes/${encodeURIComponent(bare)}`, {
-        country: this.country.apiCountry,
-        locale: this.country.locale,
-      });
-      return payload && typeof payload === "object" ? (payload as Record<string, unknown>) : { id: bare };
+      const recipe = await this.loadRecipe(recipeId);
+      const url = recipeImageUrl(stringField(recipe, ["imageLink", "imagePath", "image", "imageUrl"]));
+      const image = await this.fetchPublicImage(url);
+      return {
+        recipeId: stringField(recipe, ["id", "recipeId"]) ?? recipeId.trim(),
+        name: stringField(recipe, ["name", "title"]),
+        url,
+        mimeType: image.mimeType,
+        data: image.data,
+      };
     });
+  }
+
+  private async loadRecipe(recipeId: string): Promise<Record<string, unknown>> {
+    const bare = recipeId.split("-", 1)[0]?.trim();
+    if (!bare) {
+      throw new HelloFreshApiError("api", "A recipe id is required.");
+    }
+    const payload = await this.getJson(`/gw/recipes/recipes/${encodeURIComponent(bare)}`, {
+      country: this.country.apiCountry,
+      locale: this.country.locale,
+    });
+    return payload && typeof payload === "object" ? (payload as Record<string, unknown>) : { id: bare };
+  }
+
+  private async fetchPublicImage(url: string): Promise<{ mimeType: string; data: string }> {
+    const response = await loggedFetch(
+      this.fetchImpl,
+      url,
+      {
+        method: "GET",
+        headers: {
+          Accept: "image/jpeg,image/*",
+          "User-Agent": USER_AGENT,
+        },
+      },
+      { country: this.country.code, userId: this.account.userId }
+    );
+    if (response.url && !helloFreshCdnUrl(response.url)) {
+      throw new HelloFreshApiError("api", "This recipe image is not on the HelloFresh CDN.");
+    }
+    if (!response.ok) {
+      throw new HelloFreshApiError("api", `HelloFresh image request returned HTTP ${response.status}.`);
+    }
+    const mimeType = imageMimeType(response.headers.get("content-type"));
+    const declared = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > MAX_RECIPE_IMAGE_BYTES) {
+      throw new HelloFreshApiError("api", "The recipe image is larger than 2 MB.");
+    }
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.byteLength === 0 || bytes.byteLength > MAX_RECIPE_IMAGE_BYTES) {
+      throw new HelloFreshApiError(
+        "api",
+        bytes.byteLength === 0
+          ? "HelloFresh did not return an image."
+          : "The recipe image is larger than 2 MB."
+      );
+    }
+    return { mimeType, data: bytes.toString("base64") };
   }
 
   async selectMeals(
@@ -1224,6 +1289,40 @@ function asList(value: unknown, keys: string[]): unknown[] {
     }
   }
   return [];
+}
+
+function recipeImageUrl(value: string | undefined): string {
+  const raw = value?.trim() ?? "";
+  if (!raw) {
+    throw new HelloFreshApiError("api", "This recipe has no image.");
+  }
+  if (raw.includes("://")) {
+    if (!helloFreshCdnUrl(raw)) {
+      throw new HelloFreshApiError("api", "This recipe image is not on the HelloFresh CDN.");
+    }
+    return raw;
+  }
+  if (raw.startsWith("/") && !raw.startsWith("//")) {
+    return `${RECIPE_IMAGE_CDN_PREFIX}${raw}`;
+  }
+  throw new HelloFreshApiError("api", "This recipe image is not on the HelloFresh CDN.");
+}
+
+function helloFreshCdnUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname === "img.hellofresh.com";
+  } catch {
+    return false;
+  }
+}
+
+function imageMimeType(header: string | null): string {
+  const mime = header?.split(";")[0]?.trim().toLowerCase() ?? "";
+  if (!mime.startsWith("image/") || /\s/.test(mime)) {
+    throw new HelloFreshApiError("api", "HelloFresh did not return an image.");
+  }
+  return mime;
 }
 
 function stringField(record: Record<string, unknown>, keys: string[]): string | undefined {

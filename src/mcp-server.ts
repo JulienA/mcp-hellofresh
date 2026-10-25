@@ -29,6 +29,8 @@ const GetRecipeDetailsSchema = z.object({
   recipe_id: z.string().describe("The unique recipe identifier"),
 });
 
+const GetRecipeImageSchema = GetRecipeDetailsSchema;
+
 const SelectMealsSchema = z.object({
   week_id: z
     .string()
@@ -183,6 +185,21 @@ const TOOLS: Tool[] = [
     name: "get_recipe_details",
     description:
       "Get full recipe information including ingredients, step-by-step instructions, nutrition facts, prep time, and allergen information.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        recipe_id: {
+          type: "string",
+          description: "The unique recipe identifier",
+        },
+      },
+      required: ["recipe_id"],
+    },
+  },
+  {
+    name: "get_recipe_image",
+    description:
+      "Download the photo for a HelloFresh recipe. Returns the image and its public CDN URL.",
     inputSchema: {
       type: "object",
       properties: {
@@ -465,7 +482,9 @@ export class HelloFreshMCPServer {
   private async handleTool(
     name: string,
     args: Record<string, unknown>
-  ): Promise<{ content: Array<{ type: "text"; text: string }> }> {
+  ): Promise<{
+    content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>;
+  }> {
     const text = (data: unknown): { content: Array<{ type: "text"; text: string }> } => ({
       content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
     });
@@ -518,6 +537,25 @@ export class HelloFreshMCPServer {
         const params = GetRecipeDetailsSchema.parse(args);
         const details = await (await this.session.api()).getRecipe(params.recipe_id);
         return text(details);
+      }
+
+      case "get_recipe_image": {
+        const params = GetRecipeImageSchema.parse(args);
+        const image = await (await this.session.api()).getRecipeImage(params.recipe_id);
+        return {
+          content: [
+            { type: "image", data: image.data, mimeType: image.mimeType },
+            {
+              type: "text",
+              text: JSON.stringify({
+                recipe_id: image.recipeId,
+                name: image.name,
+                url: image.url,
+                mime_type: image.mimeType,
+              }),
+            },
+          ],
+        };
       }
 
       case "select_meals": {
