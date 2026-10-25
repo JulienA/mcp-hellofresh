@@ -260,7 +260,7 @@ export class HelloFreshApi {
   async getRecipeImage(recipeId: string): Promise<RecipeImage> {
     return this.mutex.runExclusive(async () => {
       const recipe = await this.loadRecipe(recipeId);
-      const url = recipeImageUrl(stringField(recipe, ["imageLink", "imagePath", "image", "imageUrl"]));
+      const url = recipeImageUrl(recipe);
       const image = await this.fetchPublicImage(url);
       return {
         recipeId: stringField(recipe, ["id", "recipeId"]) ?? recipeId.trim(),
@@ -1291,21 +1291,59 @@ function asList(value: unknown, keys: string[]): unknown[] {
   return [];
 }
 
-function recipeImageUrl(value: string | undefined): string {
-  const raw = value?.trim() ?? "";
-  if (!raw) {
+function recipeImageUrl(recipe: Record<string, unknown>): string {
+  const values: string[] = [];
+  for (const key of ["imageLink", "imagePath", "image", "imageUrl"]) {
+    const value = stringField(recipe, [key]);
+    if (value && !values.includes(value)) {
+      values.push(value);
+    }
+  }
+  if (values.length === 0) {
     throw new HelloFreshApiError("api", "This recipe has no image.");
   }
-  if (raw.includes("://")) {
-    if (!helloFreshCdnUrl(raw)) {
-      throw new HelloFreshApiError("api", "This recipe image is not on the HelloFresh CDN.");
+  for (const value of values) {
+    const url = cdnUrlForImageValue(value);
+    if (url) {
+      return url;
     }
-    return raw;
-  }
-  if (raw.startsWith("/") && !raw.startsWith("//")) {
-    return `${RECIPE_IMAGE_CDN_PREFIX}${raw}`;
   }
   throw new HelloFreshApiError("api", "This recipe image is not on the HelloFresh CDN.");
+}
+
+function cdnUrlForImageValue(raw: string): string | undefined {
+  const value = raw.trim();
+  if (!value) {
+    return undefined;
+  }
+  if (helloFreshCdnUrl(value)) {
+    return value;
+  }
+  const relative = relativeImagePath(value);
+  if (!relative) {
+    return undefined;
+  }
+  return `${RECIPE_IMAGE_CDN_PREFIX}${relative}`;
+}
+
+function relativeImagePath(value: string): string | undefined {
+  if (!value.includes("://") && value.startsWith("/") && !value.startsWith("//")) {
+    return value;
+  }
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    return undefined;
+  }
+  const index = url.pathname.indexOf("/image/");
+  if (index < 0) {
+    return undefined;
+  }
+  return url.pathname.slice(index);
 }
 
 function helloFreshCdnUrl(value: string): boolean {
