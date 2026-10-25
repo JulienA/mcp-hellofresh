@@ -39,6 +39,7 @@ describe("log helpers", () => {
       authorization: "Bearer mcp_abc",
       api_v2_auth: "header.payload.sig",
       refresh_token: "mcr_secret",
+      MCP_DATA_KEY: "should-not-leak-key-material",
       userId: userIdFor("fr", "alice@example.com"),
       path: "/token?code=aaaaaaaaaaaaaaaaaaaaaaaaaa",
       country: "fr",
@@ -50,6 +51,7 @@ describe("log helpers", () => {
     assert.equal(cleaned.authorization, "[redacted]");
     assert.equal(cleaned.api_v2_auth, "[redacted]");
     assert.equal(cleaned.refresh_token, "[redacted]");
+    assert.equal(cleaned.MCP_DATA_KEY, "[redacted]");
     assert.equal(cleaned.userId, userIdFor("fr", "alice@example.com").slice(0, 12));
     assert.equal(cleaned.path, "/token");
     assert.equal(cleaned.country, "fr");
@@ -57,6 +59,13 @@ describe("log helpers", () => {
     assert.equal(cleaned.code, "invalid_grant");
     assert.equal(JSON.stringify(cleaned).includes("alice@"), false);
     assert.equal(JSON.stringify(cleaned).includes("correct-hf-password"), false);
+    assert.equal(JSON.stringify(cleaned).includes("should-not-leak-key-material"), false);
+    const startup = sanitizeFields({
+      err: "MCP_DATA_KEY must be 32 bytes encoded as base64, base64url, or hex. A short passphrase is not accepted.",
+      detail: `${"a".repeat(20)}.${"b".repeat(20)}.${"c".repeat(20)}`,
+    });
+    assert.match(String(startup.err), /32 bytes/);
+    assert.equal(startup.detail, "[redacted]");
   });
 
   it("reads error codes from AuthError-shaped objects", () => {

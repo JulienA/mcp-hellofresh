@@ -13,6 +13,7 @@ exports.deletePersistedSession = deletePersistedSession;
 const promises_1 = require("node:fs/promises");
 const node_os_1 = require("node:os");
 const node_path_1 = require("node:path");
+const secret_box_js_1 = require("./secret-box.js");
 exports.SESSION_ENV_VAR = "HELLOFRESH_SESSION_PATH";
 exports.DEFAULT_SESSION_FILENAME = "session.json";
 function resolveSessionPath(env = process.env, override) {
@@ -95,28 +96,22 @@ function helloFreshCookiesAreValid(state, nowMs = Date.now()) {
     });
 }
 async function loadPersistedSession(path) {
-    try {
-        const raw = await (0, promises_1.readFile)(path, "utf8");
-        const parsed = JSON.parse(raw);
-        if (!parsed || typeof parsed !== "object" || !parsed.storageState) {
-            return undefined;
-        }
-        const storageState = filterHelloFreshStorageState(parsed.storageState);
-        if (storageState.cookies.length === 0 && storageState.origins.length === 0) {
-            return undefined;
-        }
-        return {
-            savedAt: typeof parsed.savedAt === "string" ? parsed.savedAt : new Date(0).toISOString(),
-            storageState,
-        };
+    const loaded = await (0, secret_box_js_1.readSecretText)(path, "session");
+    if (!loaded) {
+        return undefined;
     }
-    catch (error) {
-        const code = error.code;
-        if (code === "ENOENT") {
-            return undefined;
-        }
-        throw error;
+    const parsed = JSON.parse(loaded.text);
+    if (!parsed || typeof parsed !== "object" || !parsed.storageState) {
+        return undefined;
     }
+    const storageState = filterHelloFreshStorageState(parsed.storageState);
+    if (storageState.cookies.length === 0 && storageState.origins.length === 0) {
+        return undefined;
+    }
+    return {
+        savedAt: typeof parsed.savedAt === "string" ? parsed.savedAt : new Date(0).toISOString(),
+        storageState,
+    };
 }
 async function savePersistedSession(path, storageState, savedAt = new Date()) {
     const filtered = filterHelloFreshStorageState(storageState);
@@ -124,14 +119,7 @@ async function savePersistedSession(path, storageState, savedAt = new Date()) {
         savedAt: savedAt.toISOString(),
         storageState: filtered,
     };
-    const dir = (0, node_path_1.dirname)(path);
-    await (0, promises_1.mkdir)(dir, { recursive: true, mode: 0o700 });
-    const tmp = `${path}.tmp`;
-    const json = JSON.stringify(payload, null, 2);
-    await (0, promises_1.writeFile)(tmp, json, { mode: 0o600 });
-    await (0, promises_1.chmod)(tmp, 0o600);
-    await (0, promises_1.rename)(tmp, path);
-    await (0, promises_1.chmod)(path, 0o600);
+    await (0, secret_box_js_1.writeSecretText)(path, JSON.stringify(payload), "session");
     return payload;
 }
 async function deletePersistedSession(path) {

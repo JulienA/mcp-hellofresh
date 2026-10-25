@@ -1,7 +1,8 @@
-import { mkdir, readFile, rename, rm, chmod, writeFile } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { helloFreshCountry } from "./countries.js";
+import { readSecretText, writeSecretText } from "./secret-box.js";
 import { sha256Hex } from "./security.js";
 
 export const ACCOUNT_ENV_VAR = "HELLOFRESH_ACCOUNT_PATH";
@@ -94,22 +95,18 @@ export class AccountStore {
 }
 
 export async function readStoredAccount(path: string): Promise<StoredAccount | undefined> {
-  try {
-    const parsed = JSON.parse(await readFile(path, "utf8")) as StoredAccount;
-    if (!parsed || typeof parsed !== "object" || typeof parsed.accessToken !== "string") {
-      return undefined;
-    }
-    if (typeof parsed.userId !== "string" || typeof parsed.email !== "string") {
-      return undefined;
-    }
-    return parsed;
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") {
-      return undefined;
-    }
-    throw error;
+  const loaded = await readSecretText(path, "account");
+  if (!loaded) {
+    return undefined;
   }
+  const parsed = JSON.parse(loaded.text) as StoredAccount;
+  if (!parsed || typeof parsed !== "object" || typeof parsed.accessToken !== "string") {
+    return undefined;
+  }
+  if (typeof parsed.userId !== "string" || typeof parsed.email !== "string") {
+    return undefined;
+  }
+  return parsed;
 }
 
 export async function writeStoredAccount(path: string, account: StoredAccount): Promise<void> {
@@ -126,13 +123,7 @@ export async function writeStoredAccount(path: string, account: StoredAccount): 
     tokenType: account.tokenType,
     savedAt: account.savedAt,
   };
-  const dir = dirname(path);
-  await mkdir(dir, { recursive: true, mode: 0o700 });
-  const tmp = `${path}.tmp`;
-  await writeFile(tmp, JSON.stringify(payload, null, 2), { mode: 0o600 });
-  await chmod(tmp, 0o600);
-  await rename(tmp, path);
-  await chmod(path, 0o600);
+  await writeSecretText(path, JSON.stringify(payload), "account");
 }
 
 export function decodeJwtClaims(token: string): Record<string, unknown> | undefined {

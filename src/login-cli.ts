@@ -8,6 +8,7 @@
 
 import { resolveStdioAccountPath, writeStoredAccount } from "./accounts.js";
 import { captureHelloFreshAccount } from "./login-browser.js";
+import { loadDataKey } from "./secret-box.js";
 
 async function main(): Promise<void> {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
@@ -17,6 +18,7 @@ Opens a headed Chromium window on the HelloFresh login page for
 HELLOFRESH_COUNTRY (default us). Complete "Continue with Google" in that
 window (display required). The HelloFresh apiV2Auth tokens are saved to
 HELLOFRESH_ACCOUNT_PATH or ~/.config/mcp-hellofresh/account.json (mode 0600).
+MCP_DATA_KEY must be 32 bytes (base64, base64url, or hex). That key encrypts the file.
 
 HTTP connectors (claude.ai / ChatGPT) do not use this file. Each person
 signs in on the server's /authorize page with a HelloFresh password, or
@@ -26,6 +28,15 @@ Do not pass a Google password. Optional HelloFresh password accounts can
 use HELLOFRESH_EMAIL / HELLOFRESH_PASSWORD with the local MCP server.
 `);
     process.exit(0);
+  }
+
+  try {
+    loadDataKey();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(message);
+    process.exitCode = 1;
+    return;
   }
 
   const country = process.env.HELLOFRESH_COUNTRY?.trim() || "us";

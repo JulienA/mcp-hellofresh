@@ -3,6 +3,7 @@ import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { DATA_KEY_ENV } from "./secret-box.js";
 import {
   deletePersistedSession,
   filterHelloFreshStorageState,
@@ -14,6 +15,8 @@ import {
   SESSION_ENV_VAR,
   type PlaywrightStorageState,
 } from "./session.js";
+
+process.env[DATA_KEY_ENV] = Buffer.alloc(32, 0x11).toString("base64url");
 
 function sampleState(): PlaywrightStorageState {
   return {
@@ -121,22 +124,53 @@ describe("persisted session files", () => {
     const saved = await savePersistedSession(path, sampleState(), new Date("2026-10-25T00:00:00.000Z"));
     const info = await stat(path);
     assert.equal(info.mode & 0o777, 0o600);
-    const raw = JSON.parse(await readFile(path, "utf8")) as {
-      savedAt: string;
-      storageState: PlaywrightStorageState;
-    };
-    assert.equal(raw.savedAt, "2026-10-25T00:00:00.000Z");
-    assert.equal(raw.storageState.cookies.length, 1);
-    assert.equal(raw.storageState.cookies[0].name, "hf_session");
-    assert.equal(JSON.stringify(raw).includes("google-secret"), false);
+    const raw = await readFile(path, "utf8");
+    assert.equal(raw.includes("secret-hellofresh"), false);
+    assert.equal(raw.includes("google-secret"), false);
+    assert.match(raw, /aes-256-gcm/);
     assert.equal(saved.storageState.cookies[0].value, "secret-hellofresh");
 
     const loaded = await loadPersistedSession(path);
     assert.equal(loaded?.savedAt, "2026-10-25T00:00:00.000Z");
     assert.equal(loaded?.storageState.cookies.length, 1);
+    assert.equal(loaded?.storageState.cookies[0].name, "hf_session");
+    assert.equal(loaded?.storageState.cookies[0].value, "secret-hellofresh");
 
     await deletePersistedSession(path);
     assert.equal(await loadPersistedSession(path), undefined);
+  });
+
+  it("reads a legacy plaintext session and seals it on the next write", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "hf-sess-"));
+    const path = join(dir, "session.json");
+    await writeFile(
+      path,
+      JSON.stringify({
+        savedAt: "2026-10-25T00:00:00.000Z",
+        storageState: {
+          cookies: [
+            {
+              name: "hf_session",
+              value: "legacy-cookie-secret",
+              domain: ".hellofresh.com",
+              path: "/",
+              expires: -1,
+            },
+          ],
+          origins: [],
+        },
+      })
+    );
+    const loaded = await loadPersistedSession(path);
+    assert.equal(loaded?.storageState.cookies[0].value, "legacy-cookie-secret");
+    assert.match(await readFile(path, "utf8"), /legacy-cookie-secret/);
+    await savePersistedSession(path, loaded?.storageState ?? { cookies: [], origins: [] });
+    const sealed = await readFile(path, "utf8");
+    assert.equal(sealed.includes("legacy-cookie-secret"), false);
+    assert.equal(
+      (await loadPersistedSession(path))?.storageState.cookies[0].value,
+      "legacy-cookie-secret"
+    );
   });
 
   it("returns undefined for an empty or missing file", async () => {

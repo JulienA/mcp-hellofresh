@@ -2,9 +2,8 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.OAuthStore = exports.OAUTH_STORE_ENV_VAR = void 0;
 exports.emptyOAuthStoreFile = emptyOAuthStoreFile;
-const promises_1 = require("node:fs/promises");
-const node_path_1 = require("node:path");
 const auth_js_1 = require("./auth.js");
+const secret_box_js_1 = require("./secret-box.js");
 const security_js_1 = require("./security.js");
 exports.OAUTH_STORE_ENV_VAR = "MCP_OAUTH_STORE_PATH";
 const EMPTY_STORE = { clients: {}, tokens: {} };
@@ -95,21 +94,16 @@ class OAuthStore {
         if (this.loaded) {
             return this.loaded;
         }
-        try {
-            const raw = await (0, promises_1.readFile)(this.filePath, "utf8");
-            const parsed = JSON.parse(raw);
-            this.loaded = {
-                clients: parsed.clients && typeof parsed.clients === "object" ? parsed.clients : {},
-                tokens: parsed.tokens && typeof parsed.tokens === "object" ? parsed.tokens : {},
-            };
-        }
-        catch (error) {
-            const code = error.code;
-            if (code !== "ENOENT") {
-                throw error;
-            }
+        const loaded = await (0, secret_box_js_1.readSecretText)(this.filePath, "oauth");
+        if (!loaded) {
             this.loaded = { clients: {}, tokens: {} };
+            return this.loaded;
         }
+        const parsed = JSON.parse(loaded.text);
+        this.loaded = {
+            clients: parsed.clients && typeof parsed.clients === "object" ? parsed.clients : {},
+            tokens: parsed.tokens && typeof parsed.tokens === "object" ? parsed.tokens : {},
+        };
         return this.loaded;
     }
     pruneExpiredUnlocked(data, now = Date.now() / 1000) {
@@ -120,14 +114,7 @@ class OAuthStore {
         }
     }
     async saveUnlocked(data) {
-        const dir = (0, node_path_1.dirname)(this.filePath);
-        await (0, promises_1.mkdir)(dir, { recursive: true, mode: 0o700 });
-        const tmp = `${this.filePath}.tmp`;
-        const json = JSON.stringify(data, null, 2);
-        await (0, promises_1.writeFile)(tmp, json, { mode: 0o600 });
-        await (0, promises_1.chmod)(tmp, 0o600);
-        await (0, promises_1.rename)(tmp, this.filePath);
-        await (0, promises_1.chmod)(this.filePath, 0o600);
+        await (0, secret_box_js_1.writeSecretText)(this.filePath, JSON.stringify(data), "oauth");
         this.loaded = data;
     }
 }

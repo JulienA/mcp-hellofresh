@@ -3,7 +3,7 @@ import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, it, mock } from "node:test";
-import { AccountStore, userIdFor, type StoredAccount } from "./accounts.js";
+import { AccountStore, readStoredAccount, userIdFor, type StoredAccount } from "./accounts.js";
 import { createAccountLinker } from "./account-linker.js";
 import {
   HelloFreshApi,
@@ -14,6 +14,9 @@ import {
 } from "./hellofresh-api.js";
 import { AccountClients, createStdioSession } from "./hellofresh-session.js";
 import { setLogSink } from "./log.js";
+import { DATA_KEY_ENV } from "./secret-box.js";
+
+process.env[DATA_KEY_ENV] = Buffer.alloc(32, 0x11).toString("base64url");
 
 setLogSink(() => {});
 
@@ -295,7 +298,9 @@ describe("HelloFreshApi.fromPasted", () => {
     assert.equal(linked.userId, userIdFor("fr", "ada@example.com"));
     const saved = await readFile(store.fileFor(linked.userId), "utf8");
     assert.equal(saved.includes("discard-me"), false);
-    assert.match(saved, /pasted-access/);
+    assert.equal(saved.includes("pasted-access"), false);
+    assert.equal(saved.includes("ada@example.com"), false);
+    assert.equal((await store.load(linked.userId))?.accessToken, "pasted-access");
   });
 });
 
@@ -577,6 +582,9 @@ describe("stdio account", () => {
     assert.equal(api.email, "ada@example.com");
     const raw = await readFile(path, "utf8");
     assert.equal(raw.includes("stdio-password"), false);
+    assert.equal(raw.includes("stdio-access"), false);
+    assert.equal(raw.includes("ada@example.com"), false);
+    assert.equal((await readStoredAccount(path))?.accessToken, "stdio-access");
     assert.equal(calls.filter((call) => call.url.includes("/gw/login")).length, 1);
     await session.api();
     assert.equal(calls.filter((call) => call.url.includes("/gw/login")).length, 1);

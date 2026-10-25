@@ -1,16 +1,19 @@
 import assert from "node:assert/strict";
-import { mkdtemp, stat } from "node:fs/promises";
+import { mkdtemp, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import type { Browser, BrowserContext, Page } from "playwright";
 import { AuthError } from "./auth.js";
 import { HelloFreshBrowser } from "./browser.js";
+import { DATA_KEY_ENV } from "./secret-box.js";
 import {
   loadPersistedSession,
   savePersistedSession,
   type PlaywrightStorageState,
 } from "./session.js";
+
+process.env[DATA_KEY_ENV] = Buffer.alloc(32, 0x11).toString("base64url");
 
 type LaunchRecord = {
   closed: boolean;
@@ -251,9 +254,13 @@ describe("HelloFreshBrowser session lifecycle", () => {
     assert.equal(hf.isSessionFlagSet(), true);
     const info = await stat(sessionPath);
     assert.equal(info.mode & 0o777, 0o600);
+    const raw = await readFile(sessionPath, "utf8");
+    assert.equal(raw.includes("super-secret-cookie"), false);
+    assert.match(raw, /aes-256-gcm/);
     const loaded = await loadPersistedSession(sessionPath);
     assert.equal(loaded?.storageState.cookies.length, 1);
     assert.equal(loaded?.storageState.cookies[0].domain, ".hellofresh.com");
+    assert.equal(loaded?.storageState.cookies[0].value, "super-secret-cookie");
     await hf.close();
   });
 
