@@ -593,9 +593,14 @@ export class HelloFreshApi {
 
   async getPastOrders(limit: number): Promise<Array<Record<string, unknown>>> {
     return this.mutex.runExclusive(async () => {
+      const subscription = await this.primarySubscription();
+      if (!subscription.id) {
+        throw new HelloFreshApiError("api", "HelloFresh did not return a subscription id.");
+      }
       const payload = await this.getJson("/gw/my-deliveries/past-deliveries", {
         country: this.country.apiCountry,
         locale: this.country.locale,
+        subscription: subscription.id,
       });
       const weeks = asList(payload, ["weeks", "items", "data"])
         .map(asRecord)
