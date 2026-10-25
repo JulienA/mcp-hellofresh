@@ -8,6 +8,9 @@ export declare class HelloFreshApiError extends Error {
 }
 export declare const RECONNECT_MESSAGE = "HelloFresh access expired. Disconnect the connector in Claude or ChatGPT and connect it again, then sign in on the authorize page. Do not send a password in chat.";
 export declare const RATE_RECIPE_UNSUPPORTED = "rate_recipe is not available through the HelloFresh API this connector uses. Rate the recipe on the HelloFresh website.";
+/** Shared across accounts. Recipe JSON is catalog data for a country and locale, not a user. */
+export declare const RECIPE_DETAILS_TTL_MS: number;
+export declare function clearRecipeDetailsCache(): void;
 export interface RecipeSummary {
     id: string;
     name: string;
@@ -86,6 +89,7 @@ export declare class HelloFreshApi {
     getRecipe(recipeId: string): Promise<Record<string, unknown>>;
     getRecipeImage(recipeId: string): Promise<RecipeImage>;
     private loadRecipe;
+    private fetchRecipe;
     private fetchPublicImage;
     selectMeals(weekId: string, meals: Array<{
         recipeId: string;

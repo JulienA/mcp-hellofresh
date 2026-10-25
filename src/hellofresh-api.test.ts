@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, it } from "node:test";
+import { beforeEach, describe, it, mock } from "node:test";
 import { AccountStore, userIdFor, type StoredAccount } from "./accounts.js";
 import { createAccountLinker } from "./account-linker.js";
 import {
   HelloFreshApi,
   HelloFreshApiError,
+  RECIPE_DETAILS_TTL_MS,
+  clearRecipeDetailsCache,
   type FetchLike,
 } from "./hellofresh-api.js";
 import { AccountClients, createStdioSession } from "./hellofresh-session.js";
@@ -687,6 +689,10 @@ const RESIZED_TACOS =
   "https://img.hellofresh.com/w_800,c_limit,f_jpg,q_auto,fl_lossy/hellofresh_s3/image/tacos.jpg";
 
 describe("HelloFreshApi.getRecipeImage", () => {
+  beforeEach(() => {
+    clearRecipeDetailsCache();
+  });
+
   function apiFor(handler: (call: Call) => Response | undefined) {
     const recordedFetch = recorded((call) => handler(call) ?? okAccount(call) ?? Response.json({}, { status: 404 }));
     const api = new HelloFreshApi(stored("access", Math.floor(Date.now() / 1000), 1800), recordedFetch.fetchImpl);
@@ -814,11 +820,192 @@ describe("HelloFreshApi.getRecipeImage", () => {
   });
 });
 
-function stored(accessToken: string, issuedAt: number, expiresIn: number): StoredAccount {
+const RECIPE_A = "6a72e7f4ebec54be3cd9b330";
+const RECIPE_B = "6a72e7f4ebec54be3cd9b331";
+
+describe("HelloFreshApi recipe details cache", () => {
+  beforeEach(() => {
+    clearRecipeDetailsCache();
+  });
+
+  function recipeCalls(calls: Call[]): Call[] {
+    return calls.filter((call) => call.url.includes("/recipes/recipes/"));
+  }
+
+  function imageCalls(calls: Call[]): Call[] {
+    return calls.filter((call) => call.url.startsWith("https://img.hellofresh.com/"));
+  }
+
+  function client(fetchImpl: FetchLike, country: string, email: string, token = "access"): HelloFreshApi {
+    return new HelloFreshApi(stored(token, Math.floor(Date.now() / 1000), 24 * 60 * 60, country, email), fetchImpl);
+  }
+
+  it("shares one fetch between accounts in the same country", async () => {
+    const { fetchImpl, calls } = recorded((call) => {
+      if (call.url.includes(`/recipes/recipes/${RECIPE_A}`)) {
+        return Response.json({ id: RECIPE_A, name: "Tacos", steps: ["sear"] });
+      }
+      return Response.json({ message: "missing" }, { status: 404 });
+    });
+    const first = client(fetchImpl, "fr", "ada@example.com", "token-a");
+    const second = client(fetchImpl, "fr", "bea@example.com", "token-b");
+    const left = await first.getRecipe(RECIPE_A);
+    left.name = "changed";
+    const right = await second.getRecipe(RECIPE_A);
+    assert.equal(right.name, "Tacos");
+    assert.deepEqual(right.steps, ["sear"]);
+    assert.notEqual(left, right);
+    assert.equal(recipeCalls(calls).length, 1);
+    assert.equal(new URL(recipeCalls(calls)[0].url).searchParams.get("country"), "FR");
+    assert.equal(new URL(recipeCalls(calls)[0].url).searchParams.get("locale"), "fr-FR");
+  });
+
+  it("fetches again for the same id in another country", async () => {
+    const { fetchImpl, calls } = recorded((call) => {
+      if (call.url.includes(`/recipes/recipes/${RECIPE_A}`)) {
+        return Response.json({ id: RECIPE_A, name: call.origin.includes(".de") ? "Tacos DE" : "Tacos" });
+      }
+      return Response.json({ message: "missing" }, { status: 404 });
+    });
+    const france = client(fetchImpl, "fr", "ada@example.com");
+    const germany = client(fetchImpl, "de", "ada@example.com", "token-de");
+    assert.equal((await france.getRecipe(RECIPE_A)).name, "Tacos");
+    assert.equal((await germany.getRecipe(RECIPE_A)).name, "Tacos DE");
+    assert.equal(recipeCalls(calls).length, 2);
+    assert.equal(recipeCalls(calls).some((call) => call.url.includes("hellofresh.de")), true);
+    assert.equal(new URL(recipeCalls(calls)[1].url).searchParams.get("locale"), "de-DE");
+  });
+
+  it("reuses the cached recipe for images, including another account", async () => {
+    const { fetchImpl, calls } = recorded((call) => {
+      if (call.url.includes(`/recipes/recipes/${RECIPE_A}`)) {
+        return Response.json({ id: RECIPE_A, name: "Tacos", imagePath: "/image/tacos.jpg" });
+      }
+      if (call.url === RESIZED_TACOS) {
+        return new Response(TINY_JPEG, { headers: { "content-type": "image/jpeg" } });
+      }
+      return Response.json({ message: "missing" }, { status: 404 });
+    });
+    const first = client(fetchImpl, "fr", "ada@example.com");
+    const second = client(fetchImpl, "fr", "bea@example.com");
+    await first.getRecipe(RECIPE_A);
+    const ownImage = await first.getRecipeImage(RECIPE_A);
+    const sharedImage = await second.getRecipeImage(RECIPE_A);
+    assert.equal(ownImage.url, RESIZED_TACOS);
+    assert.equal(sharedImage.data, TINY_JPEG.toString("base64"));
+    assert.equal(recipeCalls(calls).length, 1);
+    assert.equal(imageCalls(calls).length, 2);
+  });
+
+  it("fetches each distinct recipe id", async () => {
+    const { fetchImpl, calls } = recorded((call) => {
+      if (call.url.includes("/recipes/recipes/")) {
+        const id = new URL(call.url).pathname.split("/").pop();
+        return Response.json({ id, name: id });
+      }
+      return Response.json({ message: "missing" }, { status: 404 });
+    });
+    const api = client(fetchImpl, "fr", "ada@example.com");
+    assert.equal((await api.getRecipe(RECIPE_A)).id, RECIPE_A);
+    assert.equal((await api.getRecipe(RECIPE_B)).id, RECIPE_B);
+    assert.equal(recipeCalls(calls).length, 2);
+  });
+
+  it("coalesces concurrent loads of the same recipe", async () => {
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let fetches = 0;
+    const fetchImpl: FetchLike = async (input) => {
+      const url = String(input);
+      if (url.includes(`/recipes/recipes/${RECIPE_A}`)) {
+        fetches += 1;
+        await gate;
+        return Response.json({ id: RECIPE_A, name: "Tacos" });
+      }
+      return Response.json({ message: "missing" }, { status: 404 });
+    };
+    const first = client(fetchImpl, "fr", "ada@example.com", "token-a");
+    const second = client(fetchImpl, "fr", "bea@example.com", "token-b");
+    const pending = Promise.all([first.getRecipe(RECIPE_A), second.getRecipe(RECIPE_A)]);
+    await new Promise<void>((resolve, reject) => {
+      setImmediate(() => {
+        try {
+          assert.equal(fetches, 1);
+          release();
+          resolve();
+        } catch (error) {
+          release();
+          reject(error instanceof Error ? error : new Error(String(error)));
+        }
+      });
+    });
+    const [left, right] = await pending;
+    assert.equal(left.name, "Tacos");
+    assert.equal(right.name, "Tacos");
+    assert.notEqual(left, right);
+    assert.equal(fetches, 1);
+  });
+
+  it("does not cache a failed recipe lookup", async () => {
+    let attempts = 0;
+    const { fetchImpl, calls } = recorded((call) => {
+      if (call.url.includes(`/recipes/recipes/${RECIPE_A}`)) {
+        attempts += 1;
+        if (attempts === 1) {
+          return Response.json({ message: "down" }, { status: 500 });
+        }
+        return Response.json({ id: RECIPE_A, name: "Tacos" });
+      }
+      return Response.json({ message: "missing" }, { status: 404 });
+    });
+    const api = client(fetchImpl, "fr", "ada@example.com");
+    await assert.rejects(() => api.getRecipe(RECIPE_A), (error: unknown) => {
+      assert.ok(error instanceof HelloFreshApiError);
+      assert.equal(error.code, "api");
+      return true;
+    });
+    assert.equal((await api.getRecipe(RECIPE_A)).name, "Tacos");
+    assert.equal(recipeCalls(calls).length, 2);
+  });
+
+  it("refetches a recipe after the cache ttl", async () => {
+    mock.timers.enable({ apis: ["Date"], now: Date.now() });
+    try {
+      let attempts = 0;
+      const { fetchImpl, calls } = recorded((call) => {
+        if (call.url.includes(`/recipes/recipes/${RECIPE_A}`)) {
+          attempts += 1;
+          return Response.json({ id: RECIPE_A, name: `Tacos ${attempts}` });
+        }
+        return Response.json({ message: "missing" }, { status: 404 });
+      });
+      const api = client(fetchImpl, "fr", "ada@example.com");
+      assert.equal((await api.getRecipe(RECIPE_A)).name, "Tacos 1");
+      mock.timers.tick(RECIPE_DETAILS_TTL_MS - 1);
+      assert.equal((await api.getRecipe(RECIPE_A)).name, "Tacos 1");
+      // lru-cache keeps an entry while its age is less than or equal to ttl.
+      mock.timers.tick(2);
+      assert.equal((await api.getRecipe(RECIPE_A)).name, "Tacos 2");
+      assert.equal(recipeCalls(calls).length, 2);
+    } finally {
+      mock.timers.reset();
+    }
+  });
+});
+
+function stored(
+  accessToken: string,
+  issuedAt: number,
+  expiresIn: number,
+  country = "fr",
+  email = "ada@example.com"
+): StoredAccount {
   return {
-    userId: userIdFor("fr", "ada@example.com"),
-    email: "ada@example.com",
-    country: "fr",
+    userId: userIdFor(country, email),
+    email,
+    country,
     accessToken,
     refreshToken: "old-refresh",
     issuedAt,

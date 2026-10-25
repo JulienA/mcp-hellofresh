@@ -1,7 +1,9 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.HelloFreshApi = exports.RATE_RECIPE_UNSUPPORTED = exports.RECONNECT_MESSAGE = exports.HelloFreshApiError = void 0;
+exports.HelloFreshApi = exports.RECIPE_DETAILS_TTL_MS = exports.RATE_RECIPE_UNSUPPORTED = exports.RECONNECT_MESSAGE = exports.HelloFreshApiError = void 0;
+exports.clearRecipeDetailsCache = clearRecipeDetailsCache;
 exports.accountFromAuthPayload = accountFromAuthPayload;
+const lru_cache_1 = require("lru-cache");
 const auth_js_1 = require("./auth.js");
 const accounts_js_1 = require("./accounts.js");
 const countries_js_1 = require("./countries.js");
@@ -20,6 +22,29 @@ exports.RATE_RECIPE_UNSUPPORTED = "rate_recipe is not available through the Hell
 const USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const RECIPE_IMAGE_CDN_PREFIX = "https://img.hellofresh.com/w_800,c_limit,f_jpg,q_auto,fl_lossy/hellofresh_s3";
 const MAX_RECIPE_IMAGE_BYTES = 2 * 1024 * 1024;
+/** Shared across accounts. Recipe JSON is catalog data for a country and locale, not a user. */
+exports.RECIPE_DETAILS_TTL_MS = 30 * 60 * 1000;
+const RECIPE_DETAILS_CACHE_MAX = 256;
+const recipeDetailsCache = new lru_cache_1.LRUCache({
+    max: RECIPE_DETAILS_CACHE_MAX,
+    ttl: exports.RECIPE_DETAILS_TTL_MS,
+    // Date.now(), not performance.now(), so tests can expire entries with mock.timers.
+    // ttlResolution 0 reads that clock on every lookup instead of caching it for 1ms.
+    perf: { now: () => Date.now() },
+    ttlResolution: 0,
+    fetchMethod: async (_key, _stale, { context }) => {
+        if (!context) {
+            throw new HelloFreshApiError("api", "A recipe id is required.");
+        }
+        return structuredClone(await context.load());
+    },
+});
+function clearRecipeDetailsCache() {
+    recipeDetailsCache.clear();
+}
+function recipeDetailsKey(country, recipeId) {
+    return `${country.apiCountry}\0${country.locale}\0${recipeId}`;
+}
 class HelloFreshApi {
     fetchImpl;
     hooks;
@@ -156,6 +181,16 @@ class HelloFreshApi {
         if (!bare) {
             throw new HelloFreshApiError("api", "A recipe id is required.");
         }
+        const key = recipeDetailsKey(this.country, bare);
+        const payload = await recipeDetailsCache.fetch(key, {
+            context: { load: () => this.fetchRecipe(bare) },
+        });
+        if (!payload) {
+            throw new HelloFreshApiError("api", "HelloFresh did not return this recipe.");
+        }
+        return structuredClone(payload);
+    }
+    async fetchRecipe(bare) {
         const payload = await this.getJson(`/gw/recipes/recipes/${encodeURIComponent(bare)}`, {
             country: this.country.apiCountry,
             locale: this.country.locale,

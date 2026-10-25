@@ -1,3 +1,4 @@
+import { LRUCache } from "lru-cache";
 import { AsyncMutex } from "./auth.js";
 import {
   emailFromClaims,
@@ -45,6 +46,37 @@ const USER_AGENT =
 const RECIPE_IMAGE_CDN_PREFIX =
   "https://img.hellofresh.com/w_800,c_limit,f_jpg,q_auto,fl_lossy/hellofresh_s3";
 const MAX_RECIPE_IMAGE_BYTES = 2 * 1024 * 1024;
+
+/** Shared across accounts. Recipe JSON is catalog data for a country and locale, not a user. */
+export const RECIPE_DETAILS_TTL_MS = 30 * 60 * 1000;
+const RECIPE_DETAILS_CACHE_MAX = 256;
+
+interface RecipeDetailsContext {
+  load: () => Promise<Record<string, unknown>>;
+}
+
+const recipeDetailsCache = new LRUCache<string, Record<string, unknown>, RecipeDetailsContext>({
+  max: RECIPE_DETAILS_CACHE_MAX,
+  ttl: RECIPE_DETAILS_TTL_MS,
+  // Date.now(), not performance.now(), so tests can expire entries with mock.timers.
+  // ttlResolution 0 reads that clock on every lookup instead of caching it for 1ms.
+  perf: { now: () => Date.now() },
+  ttlResolution: 0,
+  fetchMethod: async (_key, _stale, { context }) => {
+    if (!context) {
+      throw new HelloFreshApiError("api", "A recipe id is required.");
+    }
+    return structuredClone(await context.load());
+  },
+});
+
+export function clearRecipeDetailsCache(): void {
+  recipeDetailsCache.clear();
+}
+
+function recipeDetailsKey(country: HelloFreshCountry, recipeId: string): string {
+  return `${country.apiCountry}\0${country.locale}\0${recipeId}`;
+}
 
 export interface RecipeSummary {
   id: string;
@@ -280,6 +312,17 @@ export class HelloFreshApi {
     if (!bare) {
       throw new HelloFreshApiError("api", "A recipe id is required.");
     }
+    const key = recipeDetailsKey(this.country, bare);
+    const payload = await recipeDetailsCache.fetch(key, {
+      context: { load: () => this.fetchRecipe(bare) },
+    });
+    if (!payload) {
+      throw new HelloFreshApiError("api", "HelloFresh did not return this recipe.");
+    }
+    return structuredClone(payload);
+  }
+
+  private async fetchRecipe(bare: string): Promise<Record<string, unknown>> {
     const payload = await this.getJson(`/gw/recipes/recipes/${encodeURIComponent(bare)}`, {
       country: this.country.apiCountry,
       locale: this.country.locale,
