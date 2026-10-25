@@ -610,6 +610,113 @@ describe("upcoming deliveries", () => {
   });
 });
 
+const TINY_JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+const RESIZED_TACOS =
+  "https://img.hellofresh.com/w_800,c_limit,f_jpg,q_auto,fl_lossy/hellofresh_s3/image/tacos.jpg";
+
+describe("HelloFreshApi.getRecipeImage", () => {
+  function apiFor(handler: (call: Call) => Response | undefined) {
+    const recordedFetch = recorded((call) => handler(call) ?? okAccount(call) ?? Response.json({}, { status: 404 }));
+    const api = new HelloFreshApi(stored("access", Math.floor(Date.now() / 1000), 1800), recordedFetch.fetchImpl);
+    return { api, calls: recordedFetch.calls };
+  }
+
+  it("downloads a resized JPEG for a relative image path", async () => {
+    const { api, calls } = apiFor((call) => {
+      if (call.url.includes("/recipes/recipes/")) {
+        return Response.json({ id: "recipe-9", name: "Tacos", imagePath: "/image/tacos.jpg" });
+      }
+      if (call.url.startsWith("https://img.hellofresh.com/")) {
+        assert.equal(call.authorization, "");
+        assert.equal(call.url, RESIZED_TACOS);
+        return new Response(TINY_JPEG, { headers: { "content-type": "image/jpeg" } });
+      }
+      return undefined;
+    });
+    const image = await api.getRecipeImage("recipe-9");
+    assert.equal(image.recipeId, "recipe-9");
+    assert.equal(image.name, "Tacos");
+    assert.equal(image.url, RESIZED_TACOS);
+    assert.equal(image.mimeType, "image/jpeg");
+    assert.equal(image.data, TINY_JPEG.toString("base64"));
+    const recipeCall = calls.find((call) => call.url.includes("/recipes/recipes/"));
+    assert.equal(recipeCall?.authorization, "Bearer access");
+  });
+
+  it("keeps an absolute HelloFresh CDN link", async () => {
+    const absolute = "https://img.hellofresh.com/hellofresh_s3/image/tacos.jpg";
+    const { api } = apiFor((call) => {
+      if (call.url.includes("/recipes/recipes/")) {
+        return Response.json({ id: "recipe-9", name: "Tacos", imageLink: absolute, imagePath: "/image/other.jpg" });
+      }
+      if (call.url === absolute) {
+        return new Response(TINY_JPEG, { headers: { "content-type": "image/jpeg; charset=binary" } });
+      }
+      return undefined;
+    });
+    const image = await api.getRecipeImage("recipe-9");
+    assert.equal(image.url, absolute);
+    assert.equal(image.mimeType, "image/jpeg");
+    assert.equal(image.data, TINY_JPEG.toString("base64"));
+  });
+
+  it("errors when the recipe has no image", async () => {
+    const { api, calls } = apiFor((call) => {
+      if (call.url.includes("/recipes/recipes/")) {
+        return Response.json({ id: "recipe-9", name: "Tacos" });
+      }
+      return undefined;
+    });
+    await assert.rejects(() => api.getRecipeImage("recipe-9"), (error: unknown) => {
+      assert.ok(error instanceof HelloFreshApiError);
+      assert.equal(error.code, "api");
+      assert.match(error.message, /no image/);
+      return true;
+    });
+    assert.equal(calls.some((call) => call.url.includes("img.hellofresh.com")), false);
+  });
+
+  it("does not fetch an image hosted outside the HelloFresh CDN", async () => {
+    const { api, calls } = apiFor((call) => {
+      if (call.url.includes("/recipes/recipes/")) {
+        return Response.json({ id: "recipe-9", imageLink: "https://evil.example/pic.jpg" });
+      }
+      return undefined;
+    });
+    await assert.rejects(() => api.getRecipeImage("recipe-9"), (error: unknown) => {
+      assert.ok(error instanceof HelloFreshApiError);
+      assert.match(error.message, /not on the HelloFresh CDN/);
+      return true;
+    });
+    assert.equal(calls.some((call) => call.url.includes("evil.example")), false);
+  });
+
+  it("rejects a response that is not an image or is larger than 2 MB", async () => {
+    const htmlApi = apiFor((call) => {
+      if (call.url.includes("/recipes/recipes/")) {
+        return Response.json({ id: "recipe-9", imagePath: "/image/tacos.jpg" });
+      }
+      if (call.url.startsWith("https://img.hellofresh.com/")) {
+        return new Response("<html></html>", { headers: { "content-type": "text/html" } });
+      }
+      return undefined;
+    }).api;
+    await assert.rejects(() => htmlApi.getRecipeImage("recipe-9"), /did not return an image/);
+
+    const oversized = Buffer.alloc(2 * 1024 * 1024 + 1);
+    const bigApi = apiFor((call) => {
+      if (call.url.includes("/recipes/recipes/")) {
+        return Response.json({ id: "recipe-9", imagePath: "/image/tacos.jpg" });
+      }
+      if (call.url.startsWith("https://img.hellofresh.com/")) {
+        return new Response(oversized, { headers: { "content-type": "image/jpeg" } });
+      }
+      return undefined;
+    }).api;
+    await assert.rejects(() => bigApi.getRecipeImage("recipe-9"), /larger than 2 MB/);
+  });
+});
+
 function stored(accessToken: string, issuedAt: number, expiresIn: number): StoredAccount {
   return {
     userId: userIdFor("fr", "ada@example.com"),

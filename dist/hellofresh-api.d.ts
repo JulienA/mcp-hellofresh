@@ -17,6 +17,13 @@ export interface RecipeSummary {
     tags: string[];
     index?: number;
 }
+export interface RecipeImage {
+    recipeId: string;
+    name?: string;
+    url: string;
+    mimeType: string;
+    data: string;
+}
 export interface AccountStatus {
     authenticated: boolean;
     email: string | null;
@@ -74,6 +81,9 @@ export declare class HelloFreshApi {
         recipes: RecipeSummary[];
     }>;
     getRecipe(recipeId: string): Promise<Record<string, unknown>>;
+    getRecipeImage(recipeId: string): Promise<RecipeImage>;
+    private loadRecipe;
+    private fetchPublicImage;
     selectMeals(weekId: string, meals: Array<{
         recipeId: string;
         quantity?: number;

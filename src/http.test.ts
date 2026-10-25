@@ -15,6 +15,7 @@ import { sha256Hex } from "./security.js";
 setLogSink(() => {});
 
 const CORRECT_PASSWORD = "correct-hf-password";
+const TINY_JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
 const CLAUDE_REDIRECT = "https://claude.ai/api/mcp/auth_callback";
 const WEEK = "2099-W01";
 
@@ -110,6 +111,16 @@ function scriptedHelloFresh(calls: RecordedCall[]): FetchLike {
         return Response.json({});
       }
       return Response.json({ email: "paste@example.com" });
+    }
+    if (url.includes("/recipes/recipes/")) {
+      return Response.json({
+        id: "recipe-1",
+        name: "Tacos",
+        imagePath: "/image/tacos.jpg",
+      });
+    }
+    if (url.startsWith("https://img.hellofresh.com/")) {
+      return new Response(TINY_JPEG, { headers: { "content-type": "image/jpeg" } });
     }
     if (url.includes("/my-deliveries/menu")) {
       return Response.json({
@@ -294,7 +305,12 @@ async function completePkce(
   return { accessToken: body.access_token, refreshToken: body.refresh_token, clientId, email };
 }
 
-async function toolText(handle: HttpServerHandle, accessToken: string, name: string, args: unknown): Promise<string> {
+async function toolCall(
+  handle: HttpServerHandle,
+  accessToken: string,
+  name: string,
+  args: unknown
+): Promise<{ isError?: boolean; content?: Array<{ type?: string; text?: string; data?: string; mimeType?: string }> }> {
   const response = await fetch(`${handle.baseUrl}/mcp`, {
     method: "POST",
     headers: {
@@ -311,10 +327,18 @@ async function toolText(handle: HttpServerHandle, accessToken: string, name: str
   });
   assert.equal(response.status, 200, await response.clone().text());
   const rpc = (await readJsonOrSse(response)) as {
-    result?: { isError?: boolean; content?: Array<{ text: string }> };
+    result?: { isError?: boolean; content?: Array<{ type?: string; text?: string; data?: string; mimeType?: string }> };
     error?: { message: string };
   };
-  return rpc.result?.content?.[0]?.text ?? rpc.error?.message ?? JSON.stringify(rpc);
+  if (rpc.error) {
+    return { isError: true, content: [{ type: "text", text: rpc.error.message }] };
+  }
+  return rpc.result ?? {};
+}
+
+async function toolText(handle: HttpServerHandle, accessToken: string, name: string, args: unknown): Promise<string> {
+  const result = await toolCall(handle, accessToken, name, args);
+  return result.content?.[0]?.text ?? JSON.stringify(result);
 }
 
 describe("HTTP health and OAuth metadata", () => {
@@ -674,6 +698,36 @@ describe("/mcp authentication", () => {
       assert.match(text, /Disconnect this connector/);
       assert.match(text, /apiV2Auth/);
       assert.doesNotMatch(text, /HELLOFRESH_SESSION_PATH|GOOGLE_PASSWORD|correct-hf-password/);
+    });
+  });
+
+  it("returns the recipe photo as image content", async () => {
+    await withServer({}, async (handle, calls) => {
+      const { accessToken } = await completePkce(handle);
+      calls.length = 0;
+      const result = await toolCall(handle, accessToken, "get_recipe_image", { recipe_id: "recipe-1" });
+      assert.equal(result.isError, undefined);
+      const image = result.content?.find((item) => item.type === "image");
+      assert.equal(image?.mimeType, "image/jpeg");
+      assert.equal(image?.data, TINY_JPEG.toString("base64"));
+      const caption = JSON.parse(result.content?.find((item) => item.type === "text")?.text ?? "{}") as {
+        recipe_id: string;
+        name: string;
+        url: string;
+        mime_type: string;
+      };
+      assert.equal(caption.recipe_id, "recipe-1");
+      assert.equal(caption.name, "Tacos");
+      assert.equal(caption.mime_type, "image/jpeg");
+      assert.equal(
+        caption.url,
+        "https://img.hellofresh.com/w_800,c_limit,f_jpg,q_auto,fl_lossy/hellofresh_s3/image/tacos.jpg"
+      );
+      const cdn = calls.find((call) => call.url.startsWith("https://img.hellofresh.com/"));
+      assert.ok(cdn);
+      assert.equal(cdn.authorization, "");
+      const recipe = calls.find((call) => call.url.includes("/recipes/recipes/"));
+      assert.match(recipe?.authorization ?? "", /^Bearer hf-access-/);
     });
   });
 

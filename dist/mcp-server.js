@@ -22,6 +22,7 @@ const GetMenuSchema = zod_1.z.object({
 const GetRecipeDetailsSchema = zod_1.z.object({
     recipe_id: zod_1.z.string().describe("The unique recipe identifier"),
 });
+const GetRecipeImageSchema = GetRecipeDetailsSchema;
 const SelectMealsSchema = zod_1.z.object({
     week_id: zod_1.z
         .string()
@@ -156,6 +157,20 @@ const TOOLS = [
     {
         name: "get_recipe_details",
         description: "Get full recipe information including ingredients, step-by-step instructions, nutrition facts, prep time, and allergen information.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                recipe_id: {
+                    type: "string",
+                    description: "The unique recipe identifier",
+                },
+            },
+            required: ["recipe_id"],
+        },
+    },
+    {
+        name: "get_recipe_image",
+        description: "Download the photo for a HelloFresh recipe. Returns the image and its public CDN URL.",
         inputSchema: {
             type: "object",
             properties: {
@@ -463,6 +478,24 @@ class HelloFreshMCPServer {
                 const params = GetRecipeDetailsSchema.parse(args);
                 const details = await (await this.session.api()).getRecipe(params.recipe_id);
                 return text(details);
+            }
+            case "get_recipe_image": {
+                const params = GetRecipeImageSchema.parse(args);
+                const image = await (await this.session.api()).getRecipeImage(params.recipe_id);
+                return {
+                    content: [
+                        { type: "image", data: image.data, mimeType: image.mimeType },
+                        {
+                            type: "text",
+                            text: JSON.stringify({
+                                recipe_id: image.recipeId,
+                                name: image.name,
+                                url: image.url,
+                                mime_type: image.mimeType,
+                            }),
+                        },
+                    ],
+                };
             }
             case "select_meals": {
                 const params = SelectMealsSchema.parse(args);
