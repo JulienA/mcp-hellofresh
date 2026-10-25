@@ -11,7 +11,7 @@ This API is unofficial and can change. A bot-protection block is not a wrong pas
 | `auth_status` | Email, country, whether the access token is still valid, and when it was saved. Never returns tokens. |
 | `login` | Local stdio: open a headed window so you can finish **Continue with Google**, then save `apiV2Auth`. HTTP: tells you to disconnect and reconnect the connector. |
 | `logout` | Delete the saved tokens for this account only. |
-| `get_menu` | Menu for an upcoming week |
+| `get_menu` | Menu for an upcoming week, with prep time in minutes, the card label, and tags |
 | `get_recipe_details` | Recipe payload from `/gw/recipes` |
 | `get_recipe_image` | Recipe photo from the HelloFresh CDN |
 | `select_meals` | Save a meal selection for a week. `quantity` is how many cartons of each recipe. |
@@ -163,7 +163,7 @@ claude mcp add hellofresh -- npx -y @striderlabs/mcp-hellofresh
 
 `logout` deletes only the account linked to this connection.
 
-`get_menu`: `week_offset` optional, 0–4.
+`get_menu`: `week_offset` optional, 0–4. Each recipe includes `prepTime` (minutes, or `null`), `label` (card badge), and `tags`. `get_recipe_details` is for ingredients, steps, nutrition, and allergens.
 
 `get_recipe_details`: `recipe_id` required.
 

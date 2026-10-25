@@ -51,7 +51,10 @@ export interface RecipeSummary {
   name: string;
   description: string;
   imageUrl?: string;
-  prepTime: number;
+  /** Minutes, or null when HelloFresh did not send a readable time. */
+  prepTime: number | null;
+  /** Card badge, such as "Rapide". Omitted when there is none. */
+  label?: string;
   tags: string[];
   index?: number;
 }
@@ -1156,6 +1159,89 @@ function selectionQuantity(record: Record<string, unknown>): number {
   return oneOff > 0 ? oneOff : 0;
 }
 
+function prepMinutes(recipe: Record<string, unknown>): number | null {
+  for (const key of ["prepTime", "totalTime"]) {
+    const minutes = durationMinutes(recipe[key]);
+    if (minutes !== undefined) {
+      return minutes;
+    }
+  }
+  return null;
+}
+
+function durationMinutes(value: unknown): number | undefined {
+  if (typeof value === "number" || typeof value === "string") {
+    const numeric = numberField({ value }, ["value"]);
+    if (numeric !== undefined) {
+      return numeric;
+    }
+  }
+  if (typeof value === "string") {
+    return isoDurationMinutes(value);
+  }
+  return undefined;
+}
+
+function isoDurationMinutes(value: string): number | undefined {
+  const match = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$/i.exec(value.trim());
+  if (!match) {
+    return undefined;
+  }
+  const [, days, hours, minutes, seconds] = match;
+  if (!days && !hours && !minutes && !seconds) {
+    return undefined;
+  }
+  const total =
+    Number(days ?? 0) * 24 * 60 +
+    Number(hours ?? 0) * 60 +
+    Number(minutes ?? 0) +
+    Number(seconds ?? 0) / 60;
+  return Math.round(total);
+}
+
+function recipeLabel(recipe: Record<string, unknown>): string | undefined {
+  if (typeof recipe.label === "string") {
+    const text = recipe.label.trim();
+    return text || undefined;
+  }
+  const label = asRecord(recipe.label);
+  if (!label || label.displayLabel === false) {
+    return undefined;
+  }
+  return stringField(label, ["text", "name"])?.trim();
+}
+
+function recipeTags(recipe: Record<string, unknown>, label: string | undefined): string[] {
+  if (!Array.isArray(recipe.tags)) {
+    return [];
+  }
+  const named = recipe.tags.flatMap((tag) => {
+    if (typeof tag === "string") {
+      const name = tag.trim();
+      return name ? [{ name, display: undefined as boolean | undefined }] : [];
+    }
+    const record = asRecord(tag);
+    const name = record ? stringField(record, ["name", "type", "slug"])?.trim() : undefined;
+    if (!record || !name) {
+      return [];
+    }
+    const display = record.displayLabel;
+    return [{ name, display: typeof display === "boolean" ? display : undefined }];
+  });
+  const displayed = named.filter((tag) => tag.display === true);
+  const source = displayed.length > 0 ? displayed : named;
+  const tags: string[] = [];
+  const labelKey = label?.toLocaleLowerCase();
+  for (const tag of source) {
+    const key = tag.name.toLocaleLowerCase();
+    if (key === labelKey || tags.some((item) => item.toLocaleLowerCase() === key)) {
+      continue;
+    }
+    tags.push(tag.name);
+  }
+  return tags;
+}
+
 function recipesFromPayload(payload: unknown): RecipeSummary[] {
   const meals = [
     ...asList(payload, ["meals", "courses", "recipes", "items"]),
@@ -1172,13 +1258,15 @@ function recipesFromPayload(payload: unknown): RecipeSummary[] {
     if (!id || !name) {
       continue;
     }
+    const label = recipeLabel(recipe);
     recipes.push({
       id,
       name,
       description: stringField(recipe, ["headline", "description"]) ?? "",
       imageUrl: stringField(recipe, ["imagePath", "image", "imageUrl"]),
-      prepTime: numberField(recipe, ["prepTime", "totalTime"]) ?? 0,
-      tags: [],
+      prepTime: prepMinutes(recipe),
+      ...(label ? { label } : {}),
+      tags: recipeTags(recipe, label),
       index: numberField(record, ["index"]),
     });
   }

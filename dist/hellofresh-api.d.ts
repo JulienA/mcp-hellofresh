@@ -13,7 +13,10 @@ export interface RecipeSummary {
     name: string;
     description: string;
     imageUrl?: string;
-    prepTime: number;
+    /** Minutes, or null when HelloFresh did not send a readable time. */
+    prepTime: number | null;
+    /** Card badge, such as "Rapide". Omitted when there is none. */
+    label?: string;
     tags: string[];
     index?: number;
 }
