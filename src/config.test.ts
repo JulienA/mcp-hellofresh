@@ -28,6 +28,36 @@ describe("loadHttpRuntimeConfig", () => {
     assert.equal(config.usersDir, "/var/lib/mcp-hellofresh/users");
   });
 
+  it("honors MCP_AUTH_DB_PATH and BETTER_AUTH_SECRET", () => {
+    const config = loadHttpRuntimeConfig(
+      {
+        HOST: "127.0.0.1",
+        PORT: "8090",
+        MCP_AUTH_DB_PATH: "/data/auth.sqlite",
+        BETTER_AUTH_SECRET: "a".repeat(32),
+      },
+      []
+    );
+    assert.equal(config.authDbPath, "/data/auth.sqlite");
+    assert.equal(config.usersDir, "/data/users");
+    assert.equal(config.authSecret, "a".repeat(32));
+  });
+
+  it("rejects a short BETTER_AUTH_SECRET", () => {
+    assert.throws(
+      () =>
+        loadHttpRuntimeConfig(
+          { HOST: "127.0.0.1", BETTER_AUTH_SECRET: "too-short" },
+          []
+        ),
+      (err: unknown) => {
+        assert.ok(err instanceof ConfigError);
+        assert.match(err.message, /BETTER_AUTH_SECRET/);
+        return true;
+      }
+    );
+  });
+
   it("requires HTTPS PUBLIC_BASE_URL off localhost", () => {
     assert.throws(
       () =>

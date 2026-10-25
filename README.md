@@ -1,6 +1,6 @@
 # @striderlabs/mcp-hellofresh
 
-A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) connector for [HelloFresh](https://www.hellofresh.com). One HTTP server stores many HelloFresh accounts. Each connector signs in on `/authorize` to its own account. Tools call HelloFresh's `/gw` API for that account only.
+A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) connector for [HelloFresh](https://www.hellofresh.com). One HTTP server stores many HelloFresh accounts. Each connector signs in on the `/sign-in` page (started from `/oauth2/authorize`) to its own account. Tools call HelloFresh's `/gw` API for that account only.
 
 This API is unofficial and can change. A bot-protection block is not a wrong password.
 
@@ -27,16 +27,23 @@ This API is unofficial and can change. A bot-protection block is not a wrong pas
 
 ## Requirements
 
-- Node.js 20+
+- Node.js 22.13+ (HTTP uses the built-in `node:sqlite` module)
 - A HelloFresh account in a supported country (`us`, `ca`, `uk`, `au`, `nz`, `de`, `at`, `ch`, `nl`, `be`, `lu`, `fr`, `ie`, `dk`, `no`, `se`)
 
 Playwright is optional. It is used only by local `npm run login` (and the stdio `login` tool) so you can finish Google sign-in in a window on your machine. The HTTP server does not launch a browser.
 
 ## Installation
 
+This project is run from a **git checkout**, not from npm. TypeScript is compiled locally (`dist/` is not committed), so `npm install @striderlabs/mcp-hellofresh` and `npx mcp-hellofresh` do not work until you clone, build, and run the files under `dist/` yourself (or use the Docker image for HTTP).
+
 ```bash
-npm install @striderlabs/mcp-hellofresh
+git clone https://github.com/JulienA/mcp-hellofresh.git
+cd mcp-hellofresh
+npm ci
+npm run build
 ```
+
+After `npm run build`, the CLI entry points are `dist/index.js` (stdio or `--http`) and `dist/login-cli.js` (`npm run login`).
 
 For local Google sign-in, also install Chromium:
 
@@ -46,50 +53,55 @@ npx playwright install chromium
 
 ## Remote HTTP (claude.ai and ChatGPT)
 
+From the repo (after `npm run build`), with `MCP_DATA_KEY` set:
+
 ```bash
-npx mcp-hellofresh --http
+npm run start:http
 ```
 
-Connector URL: `https://<your-host>/mcp`
+Or Docker (see below), which runs `npm run build` inside the image. Connector URL: `https://<your-host>/mcp`
 
 One process stores many HelloFresh accounts. The account id is the SHA-256 of the country code, a newline, and the trimmed lowercased email. The same country and email from Claude and from ChatGPT share `users/<userId>/tokens.json` in the users directory. That file is mode `0600` and encrypted with `MCP_DATA_KEY`. Another country is another account.
 
-HelloFresh does not offer third-party OAuth. Claude and ChatGPT complete OAuth against this server (dynamic client registration, PKCE, refresh). The HelloFresh sign-in happens in the browser, on `/authorize`, and only for that person:
+HelloFresh does not offer third-party OAuth. Claude and ChatGPT complete OAuth against this server. The authorization server is [Better Auth](https://www.better-auth.com) with `@better-auth/mcp` (JWT access tokens, PKCE S256, DCR, refresh rotation, revocation, RFC 8414/9728, CIMD). The MCP TypeScript SDK owns `/mcp` transport and the bearer gate. `jose` verifies JWT signatures against the library JWKS.
+
+The HelloFresh sign-in happens in the browser, on the Better Auth login page (`/sign-in`), and only for that person:
 
 1. Choose the country.
 2. Either enter the HelloFresh email and password (not a Google, Apple, or Facebook password), or sign in on the HelloFresh website yourself — **Continue with Google** included — and paste the `apiV2Auth` value from that browser.
-3. The server keeps the access token and refresh token, checks `GET /gw/api/customers/me/subscriptions`, and discards the password and the raw paste.
+3. The server keeps the HelloFresh access token and refresh token, checks `GET /gw/api/customers/me/subscriptions`, and discards the password and the raw paste.
 
 The password is never stored. HelloFresh access tokens refresh from the saved refresh token. When HelloFresh rejects the refresh, disconnect the connector and connect it again.
 
 Anyone who can finish OAuth against this server can store their HelloFresh tokens on it. Default redirect hosts are `claude.ai`, `claude.com`, and `chatgpt.com`. Loopback redirects stay allowed unless `MCP_OAUTH_ALLOW_LOOPBACK=0`. Publish the hostname only when that is intended.
 
-MCP access tokens last one hour (`ACCESS_TOKEN_TTL_SEC`). Refresh tokens last 30 days (`REFRESH_TOKEN_TTL_SEC`) and rotate on use. Both are stored hashed and carry the HelloFresh account id.
+MCP access tokens are signed EdDSA JWTs (one hour). Refresh tokens last 30 days, are stored hashed in SQLite, and rotate on use. JWT access tokens carry the HelloFresh account id as `userId`.
+
+**Migration:** existing opaque MCP tokens and `oauth-store.json` are not imported. Disconnect each connector in Claude/ChatGPT and connect it again. HelloFresh account files in `users/` stay valid if `MCP_DATA_KEY` is unchanged.
 
 ### Environment
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `MCP_DATA_KEY` | yes | 32-byte AES-256-GCM key, as base64, base64url, or hex. Encrypts account tokens, the OAuth store, and the local session file. Only this key can read them. |
+| `MCP_DATA_KEY` | yes | 32-byte AES-256-GCM key, as base64, base64url, or hex. Encrypts HelloFresh account tokens and the local stdio session file. Also used as the Better Auth secret unless `BETTER_AUTH_SECRET` is set. |
+| `BETTER_AUTH_SECRET` | no | 32+ character secret for Better Auth cookies and JWT private-key encryption. Defaults to `MCP_DATA_KEY`. |
 | `PUBLIC_BASE_URL` | yes off localhost | Public HTTPS origin, e.g. `https://hf-mcp.example.com` (no path) |
 | `HOST` | no | Bind address (default `127.0.0.1`; Docker uses `0.0.0.0`) |
 | `PORT` | no | Bind port (default `8080`) |
 | `MCP_HTTP` | no | `1`, `true`, or `yes` enables HTTP without `--http` |
-| `MCP_OAUTH_STORE_PATH` | no | OAuth clients and hashed tokens (file mode `0600`, encrypted). Default `~/.config/mcp-hellofresh/oauth-store.json`, or `%APPDATA%\mcp-hellofresh\oauth-store.json` on Windows. `XDG_CONFIG_HOME` is honored. |
-| `MCP_USERS_DIR` | no | Per-account token directory. Default is the `users` directory next to the OAuth store. |
+| `MCP_AUTH_DB_PATH` | no | SQLite file for OAuth clients, authorization codes, refresh tokens, and JWKS (mode `0600`). Default `~/.config/mcp-hellofresh/auth.sqlite`, or `%APPDATA%\mcp-hellofresh\auth.sqlite` on Windows. `XDG_CONFIG_HOME` is honored. |
+| `MCP_USERS_DIR` | no | Per-account token directory. Default is the `users` directory next to the auth database. |
 | `MCP_OAUTH_REDIRECT_HOSTS` | no | Comma-separated redirect hosts (default `claude.ai,claude.com,chatgpt.com`) |
 | `MCP_OAUTH_ALLOW_LOOPBACK` | no | Set `0` to refuse loopback redirect URIs (`localhost`, `127.0.0.1`, `::1`) |
-| `MCP_AUTHORIZE_MAX_ATTEMPTS` | no | Authorize attempts in the window (default `10`) |
-| `MCP_AUTHORIZE_WINDOW_MS` | no | Rate-limit window in ms (default `900000`, 15 minutes) |
 | `LOG_LEVEL` | no | `debug`, `info` (default), `warn`, or `error`. JSON lines on stderr. `/healthz` is `debug`. |
 
-Generate a key with `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"`. Keep it in the environment only, not in the image and not in git. A short passphrase is rejected. An existing plaintext file is still read once when the key is set, then rewritten encrypted on the next save. Without the key, the process refuses to start and those files cannot be read.
+Generate a key with `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"`. Keep it in the environment only, not in the image and not in git. A short passphrase is rejected. An existing plaintext HelloFresh token file is still read once when the key is set, then rewritten encrypted on the next save. Without the key, the process refuses to start and those files cannot be read.
 
-The default is 10 attempts per 900000 ms (15 minutes). The key is the first `X-Forwarded-For` entry, otherwise `cf-connecting-ip`, otherwise one shared bucket named `local`. Password sign-in is also counted per email. A pasted `apiV2Auth` is counted only on that header key. The TCP peer address is not the key.
+Better Auth rate-limits OAuth endpoints (token, authorize, register, revoke) and `/sign-in` (10 attempts / 15 minutes). JWT signing keys are generated on first start, encrypted by Better Auth, and stored in the SQLite JWKS table.
 
-JSON logs go to stderr (`docker compose logs`). Each line has `ts`, `level`, and `msg` (`http.request`, `oauth.authorize`, `oauth.token`, `mcp.tool`, `hellofresh.request`). They include method, path, status, duration, OAuth outcome, tool name, and a truncated account id. They do not include passwords, tokens, emails, or `Authorization` headers. `/healthz` is logged at `debug`.
+JSON logs go to stderr (`docker compose logs`). Each line has `ts`, `level`, and `msg` (`http.request`, `oauth.authorize`, `oauth.register`, `mcp.tool`, `hellofresh.request`). They include method, path, status, duration, OAuth outcome, tool name, and a truncated account id. They do not include passwords, tokens, emails, or `Authorization` headers. `/healthz` is logged at `debug`.
 
-Endpoints: `/mcp` (the handler accepts the MCP methods after bearer auth), `GET /healthz`, and OAuth (`/.well-known/oauth-protected-resource`, `/.well-known/oauth-authorization-server`, `/authorize`, `/token`, `/register`). Redirect URIs are allowlisted.
+Endpoints: `/mcp` (MCP methods after JWT bearer auth), `GET /healthz`, `/sign-in` (HelloFresh link), and Better Auth OAuth (`/.well-known/oauth-authorization-server`, `/jwks`, `/oauth2/authorize`, `/oauth2/token`, `/oauth2/register`, `/oauth2/revoke`). RFC 9728 resource metadata is served by the MCP SDK. Redirect URIs are allowlisted.
 
 **claude.ai:** Settings → Connectors → custom connector → `https://<your-host>/mcp`.  
 **ChatGPT:** Connectors → MCP connector with the same URL.
@@ -116,7 +128,7 @@ docker run --rm -p 8080:8080 \
   mcp-hellofresh
 ```
 
-`/data/oauth-store.json` holds OAuth clients and hashed tokens. `/data/users/<userId>/tokens.json` holds one HelloFresh account. Both are encrypted with `MCP_DATA_KEY`.
+`/data/auth.sqlite` holds Better Auth OAuth state and JWKS (mode `0600`). `/data/users/<userId>/tokens.json` holds one HelloFresh account, encrypted with `MCP_DATA_KEY`. Keep the volume so signing keys and refresh tokens survive restarts.
 
 `docker-compose.yml` runs the same image. Compose refuses to start when `PUBLIC_BASE_URL` or `MCP_DATA_KEY` is missing. The same variables can live in a `.env` file next to `docker-compose.yml`. The `hellofresh-data` volume is mounted at `/data`. The key is not written into the image.
 
@@ -128,12 +140,14 @@ PUBLIC_BASE_URL='https://hf-mcp.example.com' MCP_DATA_KEY='paste-32-byte-base64u
 
 One person, one process, one file. The file is `HELLOFRESH_ACCOUNT_PATH`, or `~/.config/mcp-hellofresh/account.json` (Windows: `%APPDATA%\mcp-hellofresh\account.json`). `XDG_CONFIG_HOME` is honored. This is not the HTTP `users/` directory. `MCP_DATA_KEY` encrypts that file, and the process will not start without it.
 
+Use the absolute path to your checkout (replace `/path/to/mcp-hellofresh`):
+
 ```json
 {
   "mcpServers": {
     "hellofresh": {
-      "command": "npx",
-      "args": ["-y", "@striderlabs/mcp-hellofresh"],
+      "command": "node",
+      "args": ["/path/to/mcp-hellofresh/dist/index.js"],
       "env": {
         "HELLOFRESH_COUNTRY": "fr",
         "MCP_DATA_KEY": "paste-32-byte-base64url-key"
@@ -148,7 +162,7 @@ Password accounts can set `HELLOFRESH_EMAIL` and `HELLOFRESH_PASSWORD`. Those ar
 Google, Apple, or Facebook accounts: on a machine with a display, run `npm run login` (or the `login` tool). Finish **Continue with Google** in the window. The command reads `apiV2Auth` and saves tokens to that file (mode `0600`, encrypted with `MCP_DATA_KEY`). Do not type a Google password into the chat, the terminal, or an MCP prompt.
 
 ```bash
-claude mcp add hellofresh -- npx -y @striderlabs/mcp-hellofresh
+claude mcp add hellofresh -- node /path/to/mcp-hellofresh/dist/index.js
 ```
 
 ## Example prompts
@@ -190,13 +204,13 @@ claude mcp add hellofresh -- npx -y @striderlabs/mcp-hellofresh
 
 ## Security
 
-- Never store or automate a Google, Apple, or Facebook password. The authorize page has no field for one.
+- Never store or automate a Google, Apple, or Facebook password. The login page has no field for one.
 - A HelloFresh password is used only for that `/gw/login` request. It is not stored, logged, or returned to the model.
-- Account files, the OAuth store, and the local session file are encrypted with AES-256-GCM. The key lives only in `MCP_DATA_KEY`. Files stay mode `0600`. OAuth access and refresh tokens are also stored hashed inside that encrypted store.
-- A previous plaintext file is read once when the key is set, and rewritten encrypted on the next save. The key is never logged.
-- Every MCP access token carries a HelloFresh account id. A token without one is rejected.
-- `/authorize` stores the visitor's HelloFresh tokens on this server.
-- Authorize attempts use the forwarding headers above, plus the email on password sign-in.
+- HelloFresh account files and the local stdio session file are encrypted with AES-256-GCM. The key lives only in `MCP_DATA_KEY`. Files stay mode `0600`.
+- OAuth clients, refresh tokens, and JWKS live in Better Auth's SQLite database. JWT private keys are encrypted by Better Auth. Refresh tokens are hashed.
+- A previous plaintext HelloFresh token file is read once when the key is set, and rewritten encrypted on the next save. The key is never logged.
+- Every MCP access token is a signed JWT. `/mcp` verifies signature, `iss`, `aud` (RFC 8707 resource), `exp`, and `mcp` scope with `jose`, then requires `userId`.
+- `/sign-in` stores the visitor's HelloFresh tokens on this server. The form uses Better Auth origin checks plus a signed OAuth query, and sets `frame-ancestors 'none'`.
 - `logout` removes one account. It does not sign you out of Google.
 - Redirect URIs are allowlisted. The public URL must be HTTPS except on localhost.
 - This does not bypass bot protection. If HelloFresh or Cloudflare blocks the call, the error says it is not a wrong password.

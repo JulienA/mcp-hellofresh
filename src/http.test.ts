@@ -5,11 +5,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { readStoredAccount, userIdFor } from "./accounts.js";
-import { ACCESS_TOKEN_TTL_SEC, type HttpRuntimeConfig } from "./config.js";
+import { type HttpRuntimeConfig } from "./config.js";
 import { clearRecipeDetailsCache, type FetchLike } from "./hellofresh-api.js";
 import { startHttpServer, type HttpServerHandle } from "./http.js";
 import { captureLogLines, setLogLevel, setLogSink } from "./log.js";
-import { OAuthStore } from "./oauth-store.js";
 import { DATA_KEY_ENV } from "./secret-box.js";
 
 process.env[DATA_KEY_ENV] = Buffer.alloc(32, 0x11).toString("base64url");
@@ -179,12 +178,11 @@ function localConfig(overrides: Partial<HttpRuntimeConfig> = {}): HttpRuntimeCon
     publicBaseUrl: issuer,
     issuer,
     resourceUrl: new URL("/mcp", issuer),
-    oauthStorePath: "/tmp/unused-oauth-store.json",
+    authDbPath: "/tmp/unused-auth.sqlite",
     usersDir: "/tmp/unused-users",
+    authSecret: process.env[DATA_KEY_ENV] ?? "test-secret-must-be-32-chars-min",
     redirectHosts: ["claude.ai", "claude.com", "chatgpt.com"],
     allowLoopbackRedirects: true,
-    authorizeMaxAttempts: 10,
-    authorizeWindowMs: 15 * 60 * 1000,
     dangerouslyAllowInsecureIssuerUrl: true,
     ...overrides,
   };
@@ -207,15 +205,17 @@ async function readJsonOrSse(response: Response): Promise<unknown> {
 }
 
 async function withServer(
-  overrides: Partial<HttpRuntimeConfig>,
+  overrides: Partial<HttpRuntimeConfig> & { accessTokenExpiresIn?: number } = {},
   fn: (handle: HttpServerHandle, calls: RecordedCall[]) => Promise<void>
 ): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "mcp-oauth-"));
-  const oauthStorePath = overrides.oauthStorePath ?? join(dir, "oauth-store.json");
-  const usersDir = overrides.usersDir ?? join(dirname(oauthStorePath), "users");
+  const { accessTokenExpiresIn, ...configOverrides } = overrides;
+  const authDbPath = configOverrides.authDbPath ?? join(dir, "auth.sqlite");
+  const usersDir = configOverrides.usersDir ?? join(dirname(authDbPath), "users");
   const calls: RecordedCall[] = [];
-  const handle = await startHttpServer(localConfig({ ...overrides, oauthStorePath, usersDir }), {
+  const handle = await startHttpServer(localConfig({ ...configOverrides, authDbPath, usersDir }), {
     fetchImpl: scriptedHelloFresh(calls),
+    accessTokenExpiresIn,
   });
   try {
     await fn(handle, calls);
@@ -224,11 +224,40 @@ async function withServer(
   }
 }
 
+function mergeCookies(existing: string, response: Response): string {
+  const map = new Map<string, string>();
+  for (const part of existing.split(";").map((item) => item.trim()).filter(Boolean)) {
+    const index = part.indexOf("=");
+    map.set(part.slice(0, index), part.slice(index + 1));
+  }
+  for (const header of response.headers.getSetCookie()) {
+    const pair = header.split(";", 1)[0] ?? "";
+    const index = pair.indexOf("=");
+    if (index < 0) {
+      continue;
+    }
+    const name = pair.slice(0, index);
+    const value = pair.slice(index + 1);
+    if (/max-age=0/i.test(header) || value === "") {
+      map.delete(name);
+    } else {
+      map.set(name, value);
+    }
+  }
+  return [...map.entries()].map(([name, value]) => `${name}=${value}`).join("; ");
+}
+
+function jwtPayload(token: string): Record<string, unknown> {
+  const parts = token.split(".");
+  assert.equal(parts.length, 3, "access token must be a JWT");
+  return JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")) as Record<string, unknown>;
+}
+
 async function registerClient(
   baseUrl: string,
   redirectUri = CLAUDE_REDIRECT
 ): Promise<{ client_id: string }> {
-  const response = await fetch(`${baseUrl}/register`, {
+  const response = await fetch(`${baseUrl}/oauth2/register`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -244,26 +273,97 @@ async function registerClient(
   return JSON.parse(text) as { client_id: string };
 }
 
-async function authorizeForm(handle: HttpServerHandle, clientId: string, challenge: string): Promise<string> {
-  const authorize = new URL("/authorize", handle.baseUrl);
+async function startAuthorize(
+  handle: HttpServerHandle,
+  clientId: string,
+  challenge: string,
+  method = "S256"
+): Promise<Response> {
+  const authorize = new URL("/oauth2/authorize", handle.baseUrl);
   authorize.searchParams.set("response_type", "code");
   authorize.searchParams.set("client_id", clientId);
   authorize.searchParams.set("redirect_uri", CLAUDE_REDIRECT);
   authorize.searchParams.set("code_challenge", challenge);
-  authorize.searchParams.set("code_challenge_method", "S256");
+  authorize.searchParams.set("code_challenge_method", method);
   authorize.searchParams.set("state", "xyz");
   authorize.searchParams.set("resource", handle.config.resourceUrl.href);
-  authorize.searchParams.set("scope", "mcp");
-  const form = await fetch(authorize);
+  authorize.searchParams.set("scope", "mcp offline_access");
+  return fetch(authorize, {
+    redirect: "manual",
+    headers: { Accept: "text/html" },
+  });
+}
+
+async function loadAuthorizeForm(
+  handle: HttpServerHandle,
+  clientId: string,
+  challenge: string
+): Promise<{ url: string; html: string }> {
+  const started = await startAuthorize(handle, clientId, challenge);
+  assert.equal(started.status, 302, await started.clone().text());
+  const location = started.headers.get("location");
+  assert.ok(location);
+  const formUrl = new URL(location, handle.baseUrl);
+  assert.equal(formUrl.pathname, "/sign-in");
+  const form = await fetch(formUrl);
   assert.equal(form.status, 200);
   const html = await form.text();
   assert.doesNotMatch(html, /Owner secret/);
   assert.match(html, /apiV2Auth/);
   assert.match(html, /Do not type a Google password/);
   assert.doesNotMatch(html, /name="google_password"/);
-  const requestId = /name="request_id" value="([^"]+)"/.exec(html)?.[1];
-  assert.ok(requestId);
-  return requestId;
+  assert.match(form.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
+  return { url: formUrl.href, html };
+}
+
+async function followToRedirect(
+  handle: HttpServerHandle,
+  start: Response,
+  cookie: string
+): Promise<{ location: URL; cookie: string }> {
+  let response = start;
+  cookie = mergeCookies(cookie, response);
+  for (let i = 0; i < 6; i += 1) {
+    if (response.status !== 302 && response.status !== 303) {
+      break;
+    }
+    const location = response.headers.get("location");
+    assert.ok(location, await response.clone().text());
+    const next = new URL(location, handle.baseUrl);
+    if (next.origin === new URL(CLAUDE_REDIRECT).origin) {
+      return { location: next, cookie };
+    }
+    response = await fetch(next, {
+      headers: {
+        cookie,
+        origin: handle.baseUrl,
+        Accept: "text/html",
+      },
+      redirect: "manual",
+    });
+    cookie = mergeCookies(cookie, response);
+  }
+  throw new Error(
+    `did not reach the client redirect, last status ${response.status}: ${(await response.text()).slice(0, 400)}`
+  );
+}
+
+async function submitHelloFresh(
+  handle: HttpServerHandle,
+  formUrl: string,
+  fields: Record<string, string>
+): Promise<{ location: URL; cookie: string }> {
+  const submitted = await fetch(formUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      origin: handle.baseUrl,
+      Accept: "text/html",
+    },
+    body: new URLSearchParams(fields),
+    redirect: "manual",
+  });
+  return followToRedirect(handle, submitted, mergeCookies("", submitted));
 }
 
 async function completePkce(
@@ -274,31 +374,23 @@ async function completePkce(
   const { client_id: clientId } = await registerClient(handle.baseUrl);
   const { verifier, challenge } = pkce();
   const resource = handle.config.resourceUrl.href;
-  const requestId = await authorizeForm(handle, clientId, challenge);
-
-  const submitted = await fetch(`${handle.baseUrl}/authorize`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      request_id: requestId,
-      auth_method: "password",
-      country: options.country ?? "fr",
-      email,
-      password: options.password ?? CORRECT_PASSWORD,
-    }),
-    redirect: "manual",
+  const form = await loadAuthorizeForm(handle, clientId, challenge);
+  const { location: redirected } = await submitHelloFresh(handle, form.url, {
+    auth_method: "password",
+    country: options.country ?? "fr",
+    email,
+    password: options.password ?? CORRECT_PASSWORD,
   });
-  assert.equal(submitted.status, 302, await submitted.clone().text());
-  const location = submitted.headers.get("location");
-  assert.ok(location);
-  const redirected = new URL(location);
-  assert.equal(redirected.origin + redirected.pathname, new URL(CLAUDE_REDIRECT).origin + new URL(CLAUDE_REDIRECT).pathname);
+  assert.equal(
+    redirected.origin + redirected.pathname,
+    new URL(CLAUDE_REDIRECT).origin + new URL(CLAUDE_REDIRECT).pathname
+  );
   assert.equal(redirected.searchParams.get("iss"), handle.config.issuer.origin);
   assert.equal(redirected.searchParams.get("state"), "xyz");
   const code = redirected.searchParams.get("code");
   assert.ok(code);
 
-  const token = await fetch(`${handle.baseUrl}/token`, {
+  const token = await fetch(`${handle.baseUrl}/oauth2/token`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
@@ -319,8 +411,10 @@ async function completePkce(
     scope: string;
   };
   assert.equal(body.token_type, "Bearer");
-  assert.equal(body.expires_in, ACCESS_TOKEN_TTL_SEC);
-  assert.equal(body.scope, "mcp");
+  assert.ok(Number.isFinite(body.expires_in) && body.expires_in > 0);
+  assert.match(body.scope, /\bmcp\b/);
+  assert.ok(body.refresh_token);
+  assert.equal(jwtPayload(body.access_token).userId, userIdFor("fr", email));
   return { accessToken: body.access_token, refreshToken: body.refresh_token, clientId, email };
 }
 
@@ -383,41 +477,50 @@ describe("HTTP health and OAuth metadata", () => {
         authorization_endpoint: string;
         token_endpoint: string;
         registration_endpoint: string;
+        revocation_endpoint?: string;
+        jwks_uri?: string;
         code_challenge_methods_supported: string[];
         grant_types_supported: string[];
+        authorization_response_iss_parameter_supported?: boolean;
+        client_id_metadata_document_supported?: boolean;
       };
       assert.equal(asBody.issuer, handle.config.issuer.origin);
-      assert.equal(asBody.authorization_endpoint, `${handle.baseUrl}/authorize`);
-      assert.equal(asBody.token_endpoint, `${handle.baseUrl}/token`);
-      assert.equal(asBody.registration_endpoint, `${handle.baseUrl}/register`);
+      assert.equal(asBody.authorization_endpoint, `${handle.baseUrl}/oauth2/authorize`);
+      assert.equal(asBody.token_endpoint, `${handle.baseUrl}/oauth2/token`);
+      assert.equal(asBody.registration_endpoint, `${handle.baseUrl}/oauth2/register`);
+      assert.equal(asBody.revocation_endpoint, `${handle.baseUrl}/oauth2/revoke`);
+      assert.equal(asBody.jwks_uri, `${handle.baseUrl}/jwks`);
       assert.deepEqual(asBody.code_challenge_methods_supported, ["S256"]);
       assert.ok(asBody.grant_types_supported.includes("authorization_code"));
       assert.ok(asBody.grant_types_supported.includes("refresh_token"));
+      assert.equal(asBody.authorization_response_iss_parameter_supported, true);
+      assert.equal(asBody.client_id_metadata_document_supported, true);
+
+      const jwks = await fetch(`${handle.baseUrl}/jwks`);
+      assert.equal(jwks.status, 200);
+      const jwksBody = (await jwks.json()) as { keys: Array<{ kty: string; alg?: string }> };
+      assert.ok(jwksBody.keys.length > 0);
+      assert.equal(jwksBody.keys[0]?.kty, "OKP");
     });
   });
 });
 
 describe("OAuth DCR + PKCE + refresh", () => {
-  it("registers a client, exchanges a PKCE code, and keeps userId on refresh", async () => {
+  it("registers a client, exchanges a PKCE S256 code, rotates refresh, and revokes", async () => {
     const dir = await mkdtemp(join(tmpdir(), "mcp-oauth-"));
-    const storePath = join(dir, "oauth-store.json");
-    await withServer({ oauthStorePath: storePath }, async (handle) => {
+    const authDbPath = join(dir, "auth.sqlite");
+    await withServer({ authDbPath }, async (handle) => {
       const tokens = await completePkce(handle, { email: "alice@example.com" });
-      assert.match(tokens.accessToken, /^mcp_/);
+      assert.equal(tokens.accessToken.split(".").length, 3);
 
-      const rawStore = await readFile(storePath, "utf8");
-      assert.equal(rawStore.includes(tokens.accessToken), false);
-      assert.equal(rawStore.includes(tokens.refreshToken), false);
-      assert.equal(rawStore.includes("alice@example.com"), false);
-      assert.match(rawStore, /aes-256-gcm/);
-      assert.equal((await stat(storePath)).mode & 0o777, 0o600);
-      assert.equal(rawStore.includes(CORRECT_PASSWORD), false);
+      const rawDb = await readFile(authDbPath);
+      assert.ok(tokens.refreshToken);
+      assert.equal(rawDb.includes(tokens.accessToken), false);
+      assert.equal(rawDb.includes(tokens.refreshToken), false);
+      assert.equal(rawDb.toString("utf8").includes("alice@example.com"), false);
+      assert.equal((await stat(authDbPath)).mode & 0o777, 0o600);
 
-      const access = await new OAuthStore(storePath).getToken(tokens.accessToken);
-      assert.equal(access?.kind, "access");
-      assert.equal(access && access.kind === "access" ? access.userId : "", userIdFor("fr", "alice@example.com"));
-
-      const refreshed = await fetch(`${handle.baseUrl}/token`, {
+      const refreshed = await fetch(`${handle.baseUrl}/oauth2/token`, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
@@ -434,14 +537,29 @@ describe("OAuth DCR + PKCE + refresh", () => {
       };
       assert.notEqual(next.access_token, tokens.accessToken);
       assert.notEqual(next.refresh_token, tokens.refreshToken);
-      const rotated = await new OAuthStore(storePath).getToken(next.access_token);
-      assert.equal(rotated?.kind, "access");
-      assert.equal(
-        rotated && rotated.kind === "access" ? rotated.userId : "",
-        userIdFor("fr", "alice@example.com")
-      );
+      assert.equal(jwtPayload(next.access_token).userId, userIdFor("fr", "alice@example.com"));
 
-      const reuse = await fetch(`${handle.baseUrl}/token`, {
+      const revoked = await fetch(`${handle.baseUrl}/oauth2/revoke`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          token: next.refresh_token,
+          client_id: tokens.clientId,
+        }),
+      });
+      assert.ok(revoked.status === 200 || revoked.status === 204, await revoked.clone().text());
+      const afterRevoke = await fetch(`${handle.baseUrl}/oauth2/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: next.refresh_token,
+          client_id: tokens.clientId,
+        }),
+      });
+      assert.equal(afterRevoke.status, 400);
+
+      const reuse = await fetch(`${handle.baseUrl}/oauth2/token`, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
@@ -456,7 +574,7 @@ describe("OAuth DCR + PKCE + refresh", () => {
 
   it("rejects a redirect_uri that is not on the allowlist", async () => {
     await withServer({}, async (handle) => {
-      const response = await fetch(`${handle.baseUrl}/register`, {
+      const response = await fetch(`${handle.baseUrl}/oauth2/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -469,46 +587,17 @@ describe("OAuth DCR + PKCE + refresh", () => {
     });
   });
 
-  it("rate-limits the authorize form and redisplays a bad password", async () => {
-    await withServer({ authorizeMaxAttempts: 2, authorizeWindowMs: 60_000 }, async (handle) => {
+  it("rejects PKCE plain", async () => {
+    await withServer({}, async (handle) => {
       const { client_id } = await registerClient(handle.baseUrl);
       const { challenge } = pkce();
-      const requestId = await authorizeForm(handle, client_id, challenge);
-      for (let i = 0; i < 2; i += 1) {
-        const denied = await fetch(`${handle.baseUrl}/authorize`, {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({
-            request_id: requestId,
-            auth_method: "password",
-            country: "fr",
-            email: "limited@example.com",
-            password: "wrong-password-value",
-          }),
-        });
-        assert.equal(denied.status, 200);
-        const html = await denied.text();
-        assert.match(html, /did not accept these credentials/i);
-        assert.doesNotMatch(html, /wrong-password-value/);
-        assert.doesNotMatch(html, /Owner secret/);
+      const started = await startAuthorize(handle, client_id, challenge, "plain");
+      assert.ok(started.status === 302 || started.status === 400, await started.clone().text());
+      if (started.status === 302) {
+        const location = new URL(started.headers.get("location") ?? "", handle.baseUrl);
+        assert.notEqual(location.searchParams.get("error"), null);
+        assert.equal(location.searchParams.get("code"), null);
       }
-      const limited = await fetch(`${handle.baseUrl}/authorize`, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          request_id: requestId,
-          auth_method: "password",
-          country: "fr",
-          email: "limited@example.com",
-          password: "wrong-password-value",
-        }),
-      });
-      assert.equal(limited.status, 429);
-      const entries = await readdir(handle.config.usersDir).catch((error: NodeJS.ErrnoException) => {
-        assert.equal(error.code, "ENOENT");
-        return [] as string[];
-      });
-      assert.deepEqual(entries, []);
     });
   });
 
@@ -516,22 +605,16 @@ describe("OAuth DCR + PKCE + refresh", () => {
     await withServer({}, async (handle) => {
       const { client_id } = await registerClient(handle.baseUrl);
       const { challenge } = pkce();
-      const requestId = await authorizeForm(handle, client_id, challenge);
-      const submitted = await fetch(`${handle.baseUrl}/authorize`, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          request_id: requestId,
-          auth_method: "password",
-          country: "fr",
-          email: "alice@example.com",
-          password: CORRECT_PASSWORD,
-        }),
-        redirect: "manual",
+      const form = await loadAuthorizeForm(handle, client_id, challenge);
+      const { location } = await submitHelloFresh(handle, form.url, {
+        auth_method: "password",
+        country: "fr",
+        email: "alice@example.com",
+        password: CORRECT_PASSWORD,
       });
-      const code = new URL(submitted.headers.get("location") ?? "").searchParams.get("code");
+      const code = location.searchParams.get("code");
       assert.ok(code);
-      const token = await fetch(`${handle.baseUrl}/token`, {
+      const token = await fetch(`${handle.baseUrl}/oauth2/token`, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
@@ -552,12 +635,14 @@ describe("OAuth DCR + PKCE + refresh", () => {
     await withServer({}, async (handle) => {
       const { client_id } = await registerClient(handle.baseUrl);
       const { challenge } = pkce();
-      const requestId = await authorizeForm(handle, client_id, challenge);
-      const submitted = await fetch(`${handle.baseUrl}/authorize`, {
+      const form = await loadAuthorizeForm(handle, client_id, challenge);
+      const submitted = await fetch(form.url, {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          origin: handle.baseUrl,
+        },
         body: new URLSearchParams({
-          request_id: requestId,
           auth_method: "password",
           country: "fr",
           email: "alice@example.com",
@@ -567,6 +652,9 @@ describe("OAuth DCR + PKCE + refresh", () => {
       });
       assert.equal(submitted.status, 200);
       assert.equal(submitted.headers.get("location"), null);
+      const html = await submitted.text();
+      assert.match(html, /did not accept these credentials/i);
+      assert.doesNotMatch(html, /wrong-password-value/);
       const entries = await readdir(handle.config.usersDir).catch(() => []);
       assert.deepEqual(entries, []);
     });
@@ -576,7 +664,7 @@ describe("OAuth DCR + PKCE + refresh", () => {
     await withServer({}, async (handle, calls) => {
       const { client_id } = await registerClient(handle.baseUrl);
       const { challenge } = pkce();
-      const requestId = await authorizeForm(handle, client_id, challenge);
+      const form = await loadAuthorizeForm(handle, client_id, challenge);
       const access = jwt({ email: "paste@example.com", iat: 1_700_000_000, exp: 1_800_000_000 });
       const pasted = JSON.stringify({
         access_token: access,
@@ -585,18 +673,12 @@ describe("OAuth DCR + PKCE + refresh", () => {
         noise: "discard-me-paste-blob",
       });
       calls.length = 0;
-      const submitted = await fetch(`${handle.baseUrl}/authorize`, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          request_id: requestId,
-          auth_method: "token",
-          country: "fr",
-          api_v2_auth: pasted,
-        }),
-        redirect: "manual",
+      const { location } = await submitHelloFresh(handle, form.url, {
+        auth_method: "token",
+        country: "fr",
+        api_v2_auth: pasted,
       });
-      assert.equal(submitted.status, 302, await submitted.clone().text());
+      assert.ok(location.searchParams.get("code"));
       const subscriptionIndex = calls.findIndex((call) => call.url.includes("/customers/me/subscriptions"));
       assert.ok(subscriptionIndex >= 0);
       assert.equal(calls.some((call) => call.url.includes("/gw/login")), false);
@@ -667,6 +749,33 @@ describe("/mcp authentication", () => {
       assert.equal(ok.status, 200, await ok.clone().text());
       const rpc = (await readJsonOrSse(ok)) as { result?: { serverInfo?: { name: string } } };
       assert.equal(rpc.result?.serverInfo?.name, "@striderlabs/mcp-hellofresh");
+
+      const tampered = `${accessToken.slice(0, -4)}xxxx`;
+      const badSig = await fetch(`${handle.baseUrl}/mcp`, {
+        method: "POST",
+        headers: {
+          ...mcpHeaders,
+          Authorization: `Bearer ${tampered}`,
+        },
+        body: JSON.stringify(initializeBody),
+      });
+      assert.equal(badSig.status, 401);
+    });
+  });
+
+  it("rejects an expired JWT access token", async () => {
+    await withServer({ accessTokenExpiresIn: 1 }, async (handle) => {
+      const { accessToken } = await completePkce(handle);
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      const expired = await fetch(`${handle.baseUrl}/mcp`, {
+        method: "POST",
+        headers: {
+          ...mcpHeaders,
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify(initializeBody),
+      });
+      assert.equal(expired.status, 401);
     });
   });
 
@@ -674,13 +783,8 @@ describe("/mcp authentication", () => {
     await withServer({}, async (handle, calls) => {
       const alice = await completePkce(handle, { email: "alice@example.com" });
       const bob = await completePkce(handle, { email: "bob@example.com" });
-      const oauth = new OAuthStore(handle.config.oauthStorePath);
-      const aliceAccess = await oauth.getToken(alice.accessToken);
-      const bobAccess = await oauth.getToken(bob.accessToken);
-      assert.equal(aliceAccess?.kind, "access");
-      assert.equal(bobAccess?.kind, "access");
-      const aliceId = aliceAccess && aliceAccess.kind === "access" ? aliceAccess.userId : "";
-      const bobId = bobAccess && bobAccess.kind === "access" ? bobAccess.userId : "";
+      const aliceId = String(jwtPayload(alice.accessToken).userId ?? "");
+      const bobId = String(jwtPayload(bob.accessToken).userId ?? "");
       assert.equal(aliceId, userIdFor("fr", "alice@example.com"));
       assert.equal(bobId, userIdFor("fr", "bob@example.com"));
       assert.notEqual(aliceId, bobId);
@@ -926,11 +1030,6 @@ describe("HTTP JSON logs", () => {
       const records = captured.records();
       assert.ok(records.some((row) => row.msg === "oauth.register"));
       assert.ok(records.some((row) => row.msg === "oauth.authorize" && row.outcome === "linked"));
-      assert.ok(
-        records.some(
-          (row) => row.msg === "oauth.token" && row.grantType === "authorization_code" && row.outcome === "issued"
-        )
-      );
       assert.ok(records.some((row) => row.msg === "mcp.tool" && row.name === "get_menu" && row.ok === true));
       assert.ok(
         records.some(
@@ -959,12 +1058,14 @@ describe("HTTP JSON logs", () => {
       await withServer({}, async (handle) => {
         const { client_id } = await registerClient(handle.baseUrl);
         const { challenge } = pkce();
-        const requestId = await authorizeForm(handle, client_id, challenge);
-        const denied = await fetch(`${handle.baseUrl}/authorize`, {
+        const form = await loadAuthorizeForm(handle, client_id, challenge);
+        const denied = await fetch(form.url, {
           method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            origin: handle.baseUrl,
+          },
           body: new URLSearchParams({
-            request_id: requestId,
             auth_method: "password",
             country: "fr",
             email: "alice@example.com",

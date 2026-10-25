@@ -8,8 +8,6 @@ export const MCP_SCOPE = "mcp";
 export const ACCESS_TOKEN_TTL_SEC = 60 * 60;
 export const REFRESH_TOKEN_TTL_SEC = 60 * 60 * 24 * 30;
 export const AUTH_CODE_TTL_SEC = 5 * 60;
-export const DEFAULT_AUTHORIZE_MAX_ATTEMPTS = 10;
-export const DEFAULT_AUTHORIZE_WINDOW_MS = 15 * 60 * 1000;
 
 export interface HttpRuntimeConfig {
   host: string;
@@ -17,12 +15,11 @@ export interface HttpRuntimeConfig {
   publicBaseUrl: URL;
   issuer: URL;
   resourceUrl: URL;
-  oauthStorePath: string;
+  authDbPath: string;
   usersDir: string;
+  authSecret: string;
   redirectHosts: string[];
   allowLoopbackRedirects: boolean;
-  authorizeMaxAttempts: number;
-  authorizeWindowMs: number;
   dangerouslyAllowInsecureIssuerUrl: boolean;
 }
 
@@ -50,18 +47,18 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
-function resolveOAuthStorePath(env: NodeJS.ProcessEnv): string {
-  if (env.MCP_OAUTH_STORE_PATH) {
-    return env.MCP_OAUTH_STORE_PATH;
+function resolveAuthDbPath(env: NodeJS.ProcessEnv): string {
+  if (env.MCP_AUTH_DB_PATH) {
+    return env.MCP_AUTH_DB_PATH;
   }
   if (env.XDG_CONFIG_HOME) {
-    return join(env.XDG_CONFIG_HOME, "mcp-hellofresh", "oauth-store.json");
+    return join(env.XDG_CONFIG_HOME, "mcp-hellofresh", "auth.sqlite");
   }
   if (process.platform === "win32") {
     const root = env.APPDATA || join(homedir(), "AppData", "Roaming");
-    return join(root, "mcp-hellofresh", "oauth-store.json");
+    return join(root, "mcp-hellofresh", "auth.sqlite");
   }
-  return join(homedir(), ".config", "mcp-hellofresh", "oauth-store.json");
+  return join(homedir(), ".config", "mcp-hellofresh", "auth.sqlite");
 }
 
 function parseRedirectHosts(env: NodeJS.ProcessEnv): string[] {
@@ -83,6 +80,17 @@ function argvValue(argv: readonly string[], flag: string): string | undefined {
   const prefix = `${flag}=`;
   const matched = argv.find((item) => item.startsWith(prefix));
   return matched ? matched.slice(prefix.length) : undefined;
+}
+
+function resolveAuthSecret(env: NodeJS.ProcessEnv): string {
+  const dedicated = env.BETTER_AUTH_SECRET?.trim();
+  if (dedicated) {
+    if (dedicated.length < 32) {
+      throw new ConfigError("BETTER_AUTH_SECRET must be at least 32 characters.");
+    }
+    return dedicated;
+  }
+  return env.MCP_DATA_KEY?.trim() ?? "";
 }
 
 export function loadHttpRuntimeConfig(
@@ -121,7 +129,7 @@ export function loadHttpRuntimeConfig(
 
   const issuer = new URL(publicBaseUrl.origin);
   const resourceUrl = new URL("/mcp", issuer);
-  const oauthStorePath = resolveOAuthStorePath(env);
+  const authDbPath = resolveAuthDbPath(env);
 
   return {
     host,
@@ -129,18 +137,11 @@ export function loadHttpRuntimeConfig(
     publicBaseUrl: issuer,
     issuer,
     resourceUrl,
-    oauthStorePath,
-    usersDir: resolveUsersDir(oauthStorePath, env),
+    authDbPath,
+    usersDir: resolveUsersDir(authDbPath, env),
+    authSecret: resolveAuthSecret(env),
     redirectHosts: parseRedirectHosts(env),
     allowLoopbackRedirects: env.MCP_OAUTH_ALLOW_LOOPBACK !== "0",
-    authorizeMaxAttempts: parsePositiveInt(
-      env.MCP_AUTHORIZE_MAX_ATTEMPTS,
-      DEFAULT_AUTHORIZE_MAX_ATTEMPTS
-    ),
-    authorizeWindowMs: parsePositiveInt(
-      env.MCP_AUTHORIZE_WINDOW_MS,
-      DEFAULT_AUTHORIZE_WINDOW_MS
-    ),
     dangerouslyAllowInsecureIssuerUrl: isLocalIssuer(issuer),
   };
 }

@@ -1,10 +1,14 @@
 node_modules/
 *.tgz
+dist/
 dist-test/
 session.json
 *.session.json
 oauth-store.json
 *.oauth-store.json
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
 .mcp-hellofresh/
 .env
 .env.*

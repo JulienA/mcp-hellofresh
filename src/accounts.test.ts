@@ -95,9 +95,9 @@ describe("account files", () => {
   });
 
   it("places users next to the OAuth store unless MCP_USERS_DIR is set", () => {
-    assert.equal(resolveUsersDir("/data/oauth-store.json", {}), "/data/users");
+    assert.equal(resolveUsersDir("/data/auth.sqlite", {}), "/data/users");
     assert.equal(
-      resolveUsersDir("/data/oauth-store.json", { MCP_USERS_DIR: "/srv/users" }),
+      resolveUsersDir("/data/auth.sqlite", { MCP_USERS_DIR: "/srv/users" }),
       "/srv/users"
     );
   });
