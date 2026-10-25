@@ -118,7 +118,14 @@ function scriptedHelloFresh(calls: RecordedCall[]): FetchLike {
       return Response.json({
         id: "recipe-1",
         name: "Tacos",
+        headline: "Crispy",
         imagePath: "/image/tacos.jpg",
+        prepTime: "PT25M",
+        ingredients: [{ id: "chicken", name: "Poulet" }],
+        yields: [{ yields: 2, ingredients: [{ id: "chicken", amount: 1, unit: "pièce" }] }],
+        steps: [{ instructions: "Dorer le <b>poulet</b>." }],
+        nutrition: [{ name: "Énergie (kcal)", amount: 640, unit: "kcal" }],
+        allergens: [{ name: "Lait" }],
       });
     }
     if (url.startsWith("https://img.hellofresh.com/")) {
@@ -127,7 +134,17 @@ function scriptedHelloFresh(calls: RecordedCall[]): FetchLike {
     if (url.includes("/my-deliveries/menu")) {
       return Response.json({
         week: new URL(url).searchParams.get("week") ?? WEEK,
-        meals: [{ index: 1, recipe: { id: "recipe-1", name: "Tacos", headline: "Crispy" } }],
+        meals: [
+          {
+            index: 1,
+            recipe: {
+              id: "recipe-1",
+              name: "Tacos",
+              headline: "Crispy",
+              imagePath: "/image/tacos.jpg",
+            },
+          },
+        ],
       });
     }
     if (url.includes("/customers/me/deliveries")) {
@@ -714,6 +731,115 @@ describe("/mcp authentication", () => {
       assert.match(text, /Disconnect this connector/);
       assert.match(text, /apiV2Auth/);
       assert.doesNotMatch(text, /HELLOFRESH_SESSION_PATH|GOOGLE_PASSWORD|correct-hf-password/);
+    });
+  });
+
+  it("advertises recipe cards and returns structured menu data", async () => {
+    await withServer({}, async (handle) => {
+      const { accessToken } = await completePkce(handle);
+      const headers = {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        Authorization: `Bearer ${accessToken}`,
+      };
+      const rpc = async (method: string, params: unknown) => {
+        const response = await fetch(`${handle.baseUrl}/mcp`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ jsonrpc: "2.0", id: 3, method, params }),
+        });
+        assert.equal(response.status, 200, await response.clone().text());
+        return readJsonOrSse(response) as Promise<{
+          result?: Record<string, unknown>;
+          error?: { message: string };
+        }>;
+      };
+
+      const initialized = await rpc("initialize", {
+        protocolVersion: "2025-03-26",
+        capabilities: {},
+        clientInfo: { name: "card-test", version: "0.0.1" },
+      });
+      const capabilities = initialized.result?.capabilities as {
+        resources?: unknown;
+        extensions?: Record<string, unknown>;
+      };
+      assert.ok(capabilities.resources);
+      assert.deepEqual(capabilities.extensions?.["io.modelcontextprotocol/ui"], {
+        mimeTypes: ["text/html;profile=mcp-app"],
+      });
+
+      const listed = await rpc("tools/list", {});
+      const tools = listed.result?.tools as Array<{ name: string; _meta?: Record<string, unknown> }>;
+      const menuTool = tools.find((tool) => tool.name === "get_menu");
+      const detailTool = tools.find((tool) => tool.name === "get_recipe_details");
+      assert.deepEqual(menuTool?._meta, {
+        ui: { resourceUri: "ui://hellofresh/menu" },
+        "ui/resourceUri": "ui://hellofresh/menu",
+      });
+      assert.deepEqual(detailTool?._meta, {
+        ui: { resourceUri: "ui://hellofresh/recipe" },
+        "ui/resourceUri": "ui://hellofresh/recipe",
+      });
+
+      const read = await rpc("resources/read", { uri: "ui://hellofresh/menu" });
+      const contents = read.result?.contents as Array<{
+        mimeType?: string;
+        text?: string;
+        _meta?: { ui?: { csp?: { resourceDomains?: string[] } } };
+      }>;
+      assert.equal(contents[0]?.mimeType, "text/html;profile=mcp-app");
+      assert.match(contents[0]?.text ?? "", /ontoolresult/);
+      assert.match(
+        contents[0]?.text ?? "",
+        /https:\/\/unpkg.com\/@modelcontextprotocol\/ext-apps@1\.7\.5\/dist\/src\/app-with-deps\.js/
+      );
+      assert.deepEqual(contents[0]?._meta?.ui?.csp?.resourceDomains, [
+        "https://img.hellofresh.com",
+        "https://unpkg.com",
+      ]);
+
+      const menu = await rpc("tools/call", { name: "get_menu", arguments: { week_offset: 0 } });
+      const structured = menu.result?.structuredContent as {
+        week_id: string;
+        recipes: Array<{ name: string; imageUrl?: string; description: string }>;
+      };
+      assert.equal(structured.week_id, WEEK);
+      assert.equal(structured.recipes[0]?.name, "Tacos");
+      assert.equal(structured.recipes[0]?.description, "Crispy");
+      assert.equal(
+        structured.recipes[0]?.imageUrl,
+        "https://img.hellofresh.com/w_800,c_limit,f_jpg,q_auto,fl_lossy/hellofresh_s3/image/tacos.jpg"
+      );
+      const menuText = (menu.result?.content as Array<{ text?: string }> | undefined)?.[0]?.text ?? "";
+      assert.match(menuText, /Tacos/);
+      assert.match(menuText, /\/image\/tacos\.jpg/);
+
+      const details = await rpc("tools/call", {
+        name: "get_recipe_details",
+        arguments: { recipe_id: "recipe-1" },
+      });
+      const card = details.result?.structuredContent as {
+        name: string;
+        imageUrl?: string;
+        prepTime: number | null;
+        calories: number | null;
+        allergens: string[];
+        ingredients: string[];
+        steps: string[];
+      };
+      assert.equal(card.name, "Tacos");
+      assert.equal(card.prepTime, 25);
+      assert.equal(card.calories, 640);
+      assert.deepEqual(card.allergens, ["Lait"]);
+      assert.deepEqual(card.ingredients, ["1 pièce Poulet"]);
+      assert.deepEqual(card.steps, ["Dorer le poulet."]);
+      assert.equal(
+        card.imageUrl,
+        "https://img.hellofresh.com/w_800,c_limit,f_jpg,q_auto,fl_lossy/hellofresh_s3/image/tacos.jpg"
+      );
+      const detailText = (details.result?.content as Array<{ text?: string }> | undefined)?.[0]?.text ?? "";
+      assert.match(detailText, /instructionsHTML|Dorer le/);
     });
   });
 

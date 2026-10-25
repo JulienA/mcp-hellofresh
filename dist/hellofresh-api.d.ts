@@ -36,6 +36,21 @@ export interface RecipeImage {
     mimeType: string;
     data: string;
 }
+/** Stable fields for one recipe card. The full HelloFresh payload stays in the tool text. */
+export interface RecipeCard {
+    id: string;
+    name: string;
+    description: string;
+    imageUrl?: string;
+    prepTime: number | null;
+    label?: string;
+    tags: string[];
+    calories: number | null;
+    allergens: string[];
+    allergenTraces: string[];
+    ingredients: string[];
+    steps: string[];
+}
 export interface AccountStatus {
     authenticated: boolean;
     email: string | null;
@@ -96,6 +111,8 @@ export declare class HelloFreshApi {
     }>;
     getRecipe(recipeId: string): Promise<Record<string, unknown>>;
     getRecipeImage(recipeId: string): Promise<RecipeImage>;
+    /** Card fields for a recipe payload already loaded from HelloFresh. */
+    recipeCard(recipe: Record<string, unknown>): RecipeCard;
     private loadRecipe;
     private fetchRecipe;
     private fetchPublicImage;
@@ -141,4 +158,6 @@ export declare class HelloFreshApi {
     private tryRelogin;
 }
 export declare function accountFromAuthPayload(payload: unknown, country: string, email: string, now: number): StoredAccount;
+/** Public img.hellofresh.com URL, or undefined when the value is not a HelloFresh image. */
+export declare function publicRecipeImageUrl(raw: string | undefined): string | undefined;
 //# sourceMappingURL=hellofresh-api.d.ts.map

@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.HelloFreshApi = exports.RECIPE_DETAILS_TTL_MS = exports.RATE_RECIPE_UNSUPPORTED = exports.RECONNECT_MESSAGE = exports.HelloFreshApiError = void 0;
 exports.clearRecipeDetailsCache = clearRecipeDetailsCache;
 exports.accountFromAuthPayload = accountFromAuthPayload;
+exports.publicRecipeImageUrl = publicRecipeImageUrl;
 const lru_cache_1 = require("lru-cache");
 const auth_js_1 = require("./auth.js");
 const accounts_js_1 = require("./accounts.js");
@@ -178,6 +179,27 @@ class HelloFreshApi {
                 data: image.data,
             };
         });
+    }
+    /** Card fields for a recipe payload already loaded from HelloFresh. */
+    recipeCard(recipe) {
+        const french = frenchTagLabels(this.country.code);
+        const nutrition = nutritionFromRecipe(recipe);
+        const label = recipeLabel(recipe);
+        const imageUrl = imageUrlFromRecipe(recipe);
+        return {
+            id: stringField(recipe, ["id", "recipeId"]) ?? "",
+            name: stringField(recipe, ["name", "title"]) ?? "",
+            description: plainText(stringField(recipe, ["headline", "description"]) ?? ""),
+            ...(imageUrl ? { imageUrl } : {}),
+            prepTime: prepMinutes(recipe),
+            ...(label ? { label } : {}),
+            tags: recipeTags(recipe, label, french),
+            calories: nutrition.calories,
+            allergens: nutrition.allergens ?? [],
+            allergenTraces: nutrition.allergenTraces ?? [],
+            ingredients: ingredientLines(recipe),
+            steps: stepLines(recipe),
+        };
     }
     async loadRecipe(recipeId) {
         const bare = recipeId.split("-", 1)[0]?.trim();
@@ -1361,12 +1383,156 @@ function recipeImageUrl(recipe) {
         throw new HelloFreshApiError("api", "This recipe has no image.");
     }
     for (const value of values) {
-        const url = cdnUrlForImageValue(value);
+        const url = publicRecipeImageUrl(value);
         if (url) {
             return url;
         }
     }
     throw new HelloFreshApiError("api", "This recipe image is not on the HelloFresh CDN.");
+}
+/** Public img.hellofresh.com URL, or undefined when the value is not a HelloFresh image. */
+function publicRecipeImageUrl(raw) {
+    const value = raw?.trim();
+    if (!value) {
+        return undefined;
+    }
+    return cdnUrlForImageValue(value);
+}
+function imageUrlFromRecipe(recipe) {
+    for (const key of ["imageLink", "imagePath", "image", "imageUrl"]) {
+        const url = publicRecipeImageUrl(stringField(recipe, [key]));
+        if (url) {
+            return url;
+        }
+    }
+    return undefined;
+}
+function ingredientLines(recipe) {
+    const catalog = ingredientCatalog(recipe.ingredients);
+    const portion = pickYield(recipe.yields);
+    if (!portion) {
+        return uniqueNames(catalog.lines);
+    }
+    const lines = [];
+    const used = new Set();
+    for (const item of portion) {
+        const record = asRecord(item);
+        if (!record) {
+            continue;
+        }
+        const id = stringField(record, ["id", "uuid"]);
+        const name = (id ? catalog.names.get(id) : undefined) ?? plainText(stringField(record, ["name", "title"]) ?? "");
+        if (!name) {
+            continue;
+        }
+        if (id) {
+            used.add(id);
+        }
+        lines.push(formatAmount(record, name) ?? name);
+    }
+    for (const [id, name] of catalog.names) {
+        if (!used.has(id)) {
+            lines.push(name);
+        }
+    }
+    return uniqueNames([...lines, ...catalog.loose]);
+}
+function ingredientCatalog(value) {
+    const names = new Map();
+    const lines = [];
+    const loose = [];
+    if (!Array.isArray(value)) {
+        return { names, lines, loose };
+    }
+    for (const item of value) {
+        if (typeof item === "string") {
+            const name = plainText(item);
+            if (name) {
+                loose.push(name);
+                lines.push(name);
+            }
+            continue;
+        }
+        const record = asRecord(item);
+        if (!record) {
+            continue;
+        }
+        const name = plainText(stringField(record, ["name", "title"]) ?? "");
+        if (!name) {
+            continue;
+        }
+        const id = stringField(record, ["id", "uuid"]);
+        if (id) {
+            names.set(id, name);
+        }
+        else {
+            loose.push(formatAmount(record, name) ?? name);
+        }
+        lines.push(formatAmount(record, name) ?? name);
+    }
+    return { names, lines, loose };
+}
+function pickYield(value) {
+    if (!Array.isArray(value) || value.length === 0) {
+        return undefined;
+    }
+    const records = value.flatMap((item) => {
+        const record = asRecord(item);
+        return record ? [record] : [];
+    });
+    const preferred = records.find((item) => numberField(item, ["yields", "servings"]) === 2) ?? records[0];
+    return Array.isArray(preferred?.ingredients) ? preferred.ingredients : undefined;
+}
+function formatAmount(record, name) {
+    const amount = numberField(record, ["amount", "quantity"]);
+    const unit = stringField(record, ["unit"])?.trim();
+    if (amount === undefined && !unit) {
+        return undefined;
+    }
+    const quantity = amount === undefined ? "" : Number.isInteger(amount) ? String(amount) : String(amount);
+    return [quantity, unit, name].filter((part) => part).join(" ");
+}
+function stepLines(recipe) {
+    const raw = Array.isArray(recipe.steps)
+        ? recipe.steps
+        : Array.isArray(recipe.instructions)
+            ? recipe.instructions
+            : [];
+    const lines = [];
+    for (const item of raw) {
+        if (typeof item === "string") {
+            const text = plainText(item);
+            if (text) {
+                lines.push(text);
+            }
+            continue;
+        }
+        const record = asRecord(item);
+        if (!record) {
+            continue;
+        }
+        const text = plainText(stringField(record, ["instructions", "instruction", "step", "description", "text"]) ??
+            stringField(record, ["instructionsHTML", "instructionsHtml"]) ??
+            "");
+        if (text) {
+            lines.push(text);
+        }
+    }
+    return lines;
+}
+function plainText(value) {
+    return value
+        .replace(/<br\s*\/?>/gi, " ")
+        .replace(/<\/(p|div|li|tr|h[1-6])>/gi, " ")
+        .replace(/<[^>]*>/g, "")
+        .replace(/&nbsp;/gi, " ")
+        .replace(/&amp;/gi, "&")
+        .replace(/&lt;/gi, "<")
+        .replace(/&gt;/gi, ">")
+        .replace(/&quot;/gi, '"')
+        .replace(/&#39;|&apos;/gi, "'")
+        .replace(/\s+/g, " ")
+        .trim();
 }
 function cdnUrlForImageValue(raw) {
     const value = raw.trim();
