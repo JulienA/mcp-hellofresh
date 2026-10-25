@@ -1,20 +1,21 @@
 #!/usr/bin/env node
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-  Tool,
-} from "@modelcontextprotocol/sdk/types.js";
+import { Server, type Tool } from "@modelcontextprotocol/server";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
-import { HelloFreshBrowser, HelloFreshCredentials } from "./browser.js";
+import {
+  formatAuthToolError,
+  LOGIN_WINDOW_MESSAGE,
+  readOptionalPasswordCredentials,
+} from "./auth.js";
+import { HelloFreshBrowser } from "./browser.js";
+
+const AUTH_TOOL_NAMES = new Set(["auth_status", "login", "logout"]);
 
 // ─── Schemas ──────────────────────────────────────────────────────────────────
 
 const GetMenuSchema = z.object({
   week_offset: z
-    .number()
     .int()
     .min(0)
     .max(4)
@@ -36,7 +37,6 @@ const SelectMealsSchema = z.object({
       z.object({
         recipe_id: z.string().describe("Recipe ID to select"),
         servings: z
-          .number()
           .int()
           .min(1)
           .max(6)
@@ -84,14 +84,12 @@ const UpdatePreferencesSchema = z.object({
 
 const ModifySubscriptionSchema = z.object({
   meals_per_week: z
-    .number()
     .int()
     .min(2)
     .max(5)
     .optional()
     .describe("Number of meals per week (2-5)"),
   servings_per_meal: z
-    .number()
     .int()
     .min(2)
     .max(4)
@@ -105,7 +103,6 @@ const ModifySubscriptionSchema = z.object({
 
 const GetPastOrdersSchema = z.object({
   limit: z
-    .number()
     .int()
     .min(1)
     .max(50)
@@ -117,7 +114,6 @@ const GetPastOrdersSchema = z.object({
 const RateRecipeSchema = z.object({
   recipe_id: z.string().describe("The recipe ID to rate"),
   rating: z
-    .number()
     .int()
     .min(1)
     .max(5)
@@ -133,6 +129,33 @@ const RateRecipeSchema = z.object({
 
 const TOOLS: Tool[] = [
   {
+    name: "auth_status",
+    description:
+      "Show whether a HelloFresh session file exists, whether its cookies look valid, and when it was saved. Does not return cookie values. Google SSO users should run login if valid is false.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+  },
+  {
+    name: "login",
+    description:
+      "Open a headed Chromium window on the HelloFresh login page so you can complete Continue with Google yourself. Requires a display. Times out if sign-in is not finished. Never send Google passwords to this tool. If the MCP client cannot show a browser, run `npm run login` instead.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+  },
+  {
+    name: "logout",
+    description:
+      "Delete the saved HelloFresh session file and close the browser. Does not sign you out of Google.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+  },
+  {
     name: "get_menu",
     description:
       "Get the current week's available recipes/meals from HelloFresh. Optionally specify a week offset to see future menus.",
@@ -140,7 +163,7 @@ const TOOLS: Tool[] = [
       type: "object",
       properties: {
         week_offset: {
-          type: "number",
+          type: "integer",
           description:
             "Week offset from current week (0 = current, 1 = next week, etc.)",
           default: 0,
@@ -184,7 +207,7 @@ const TOOLS: Tool[] = [
             properties: {
               recipe_id: { type: "string", description: "Recipe ID to select" },
               servings: {
-                type: "number",
+                type: "integer",
                 description: "Number of servings (optional)",
                 minimum: 1,
                 maximum: 6,
@@ -300,13 +323,13 @@ const TOOLS: Tool[] = [
       type: "object",
       properties: {
         meals_per_week: {
-          type: "number",
+          type: "integer",
           description: "Number of meals per week (2-5)",
           minimum: 2,
           maximum: 5,
         },
         servings_per_meal: {
-          type: "number",
+          type: "integer",
           description: "Number of servings per meal (2-4)",
           minimum: 2,
           maximum: 4,
@@ -327,7 +350,7 @@ const TOOLS: Tool[] = [
       type: "object",
       properties: {
         limit: {
-          type: "number",
+          type: "integer",
           description: "Maximum number of past orders to retrieve (default: 10, max: 50)",
           default: 10,
           minimum: 1,
@@ -348,7 +371,7 @@ const TOOLS: Tool[] = [
           description: "The recipe ID to rate",
         },
         rating: {
-          type: "number",
+          type: "integer",
           description: "Rating from 1 (poor) to 5 (excellent)",
           minimum: 1,
           maximum: 5,
@@ -369,7 +392,6 @@ const TOOLS: Tool[] = [
 class HelloFreshMCPServer {
   private server: Server;
   private hellofresh: HelloFreshBrowser;
-  private initialized = false;
 
   constructor() {
     this.server = new Server(
@@ -381,53 +403,80 @@ class HelloFreshMCPServer {
   }
 
   private async ensureInitialized(): Promise<void> {
-    if (!this.initialized) {
-      const email = process.env.HELLOFRESH_EMAIL;
-      const password = process.env.HELLOFRESH_PASSWORD;
-
-      if (!email || !password) {
-        throw new Error(
-          "HELLOFRESH_EMAIL and HELLOFRESH_PASSWORD environment variables are required."
-        );
-      }
-
-      const credentials: HelloFreshCredentials = { email, password };
-      await this.hellofresh.init();
-      await this.hellofresh.login(credentials);
-      this.initialized = true;
-    }
+    await this.hellofresh.ensureReady(readOptionalPasswordCredentials());
   }
 
   private setupHandlers(): void {
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    this.server.setRequestHandler("tools/list", async () => ({
       tools: TOOLS,
     }));
 
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    this.server.setRequestHandler("tools/call", async (request) => {
       const { name, arguments: args } = request.params;
 
       try {
-        await this.ensureInitialized();
+        if (!AUTH_TOOL_NAMES.has(name)) {
+          await this.ensureInitialized();
+        }
         return await this.handleTool(name, args ?? {});
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return {
-          content: [{ type: "text", text: `Error: ${message}` }],
-          isError: true,
-        };
+        return formatAuthToolError(error);
       }
     });
+  }
+
+  private async notifyLoginWindow(): Promise<void> {
+    if (!this.server.getClientCapabilities()?.elicitation) {
+      return;
+    }
+    try {
+      await this.server.elicitInput({
+        mode: "form",
+        message: LOGIN_WINDOW_MESSAGE,
+        requestedSchema: {
+          type: "object",
+          properties: {},
+        },
+      });
+    } catch {
+      // Client declined, timed out, or does not implement forms — login still proceeds.
+    }
   }
 
   private async handleTool(
     name: string,
     args: Record<string, unknown>
-  ): Promise<{ content: Array<{ type: string; text: string }> }> {
-    const text = (data: unknown): { content: Array<{ type: string; text: string }> } => ({
+  ): Promise<{ content: Array<{ type: "text"; text: string }> }> {
+    const text = (data: unknown): { content: Array<{ type: "text"; text: string }> } => ({
       content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
     });
 
     switch (name) {
+      case "auth_status": {
+        const status = await this.hellofresh.getAuthStatus();
+        return text(status);
+      }
+
+      case "login": {
+        void this.notifyLoginWindow();
+        const result = await this.hellofresh.interactiveLogin();
+        return text({
+          ok: true,
+          message:
+            "HelloFresh session saved. Complete Google SSO is done; cookie values are not returned.",
+          session_path: result.path,
+          saved_at: result.savedAt,
+        });
+      }
+
+      case "logout": {
+        await this.hellofresh.logout();
+        return text({
+          ok: true,
+          message: "HelloFresh session deleted and browser closed.",
+        });
+      }
+
       case "get_menu": {
         const params = GetMenuSchema.parse(args);
         const menu = await this.hellofresh.getMenu(params.week_offset);

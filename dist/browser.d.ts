@@ -1,6 +1,31 @@
+import { Browser } from "playwright";
 export interface HelloFreshCredentials {
     email: string;
     password: string;
+}
+export interface HelloFreshBrowserOptions {
+    /** Injected in tests. Production launches headless Chromium via Playwright. */
+    launch?: () => Promise<Browser>;
+    /** Headed Chromium for interactive Google SSO. Requires a display. */
+    launchHeaded?: () => Promise<Browser>;
+    /** Override session file path (tests / HELLOFRESH_SESSION_PATH). */
+    sessionPath?: string;
+    /** How long interactive Google SSO may take. */
+    loginTimeoutMs?: number;
+    /** Poll interval while waiting for Google SSO (tests). */
+    loginPollMs?: number;
+}
+export interface AuthStatus {
+    authenticated: boolean;
+    browserOpen: boolean;
+    passwordFallbackConfigured: boolean;
+    session: {
+        exists: boolean;
+        path: string;
+        savedAt: string | null;
+        helloFreshCookieCount: number;
+        valid: boolean;
+    };
 }
 export interface Recipe {
     id: string;
@@ -77,13 +102,51 @@ export interface Order {
     status: string;
 }
 export declare class HelloFreshBrowser {
+    private readonly options;
     private browser;
     private context;
     private page;
     private isLoggedIn;
     private readonly baseUrl;
+    private readonly mutex;
+    private readonly launchFn;
+    private readonly launchHeadedFn;
+    private readonly sessionPathOverride?;
+    private readonly loginTimeoutMs;
+    private readonly loginPollMs;
+    constructor(options?: HelloFreshBrowserOptions);
+    sessionFilePath(): string;
+    /** True when a Playwright browser is currently open (tests / diagnostics). */
+    hasActiveBrowser(): boolean;
+    isSessionFlagSet(): boolean;
+    /**
+     * Opens Chromium. Safe to call repeatedly: any existing browser is closed first.
+     */
     init(): Promise<void>;
+    /**
+     * Restore a saved HelloFresh session (probe + at most one password relogin).
+     * Google SSO is never retried here — use interactiveLogin() for that.
+     */
+    ensureReady(credentials?: HelloFreshCredentials): Promise<void>;
     login(credentials: HelloFreshCredentials): Promise<void>;
+    /**
+     * Opens headed Chromium on the HelloFresh login page. The user completes
+     * Continue with Google. Requires a display. Never collects Google secrets.
+     */
+    interactiveLogin(): Promise<{
+        path: string;
+        savedAt: string;
+    }>;
+    logout(): Promise<void>;
+    getAuthStatus(): Promise<AuthStatus>;
+    private ensureReadyUnlocked;
+    private passwordLoginAndSaveUnlocked;
+    private interactiveLoginUnlocked;
+    private initUnlocked;
+    private probeUnlocked;
+    private saveSessionUnlocked;
+    private dismissCookieBanner;
+    private loginUnlocked;
     private ensureLoggedIn;
     getMenu(weekOffset?: number): Promise<Recipe[]>;
     private parseApiRecipes;
@@ -124,5 +187,6 @@ export declare class HelloFreshBrowser {
         message: string;
     }>;
     close(): Promise<void>;
+    private closeUnlocked;
 }
 //# sourceMappingURL=browser.d.ts.map

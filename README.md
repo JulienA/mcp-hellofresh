@@ -6,6 +6,9 @@ A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) connector for 
 
 | Tool | Description |
 |------|-------------|
+| `auth_status` | Whether a HelloFresh session exists and looks valid (no cookie values) |
+| `login` | Open a headed browser so you can complete **Continue with Google** |
+| `logout` | Delete the saved session and close the browser |
 | `get_menu` | Browse current week's recipes with filters |
 | `get_recipe_details` | Full recipe info: ingredients, instructions, nutrition |
 | `select_meals` | Choose meals for an upcoming delivery |
@@ -21,9 +24,10 @@ A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) connector for 
 
 ## Requirements
 
-- Node.js 18+
-- A HelloFresh account
-- Playwright browser (auto-installed)
+- Node.js 20+
+- A HelloFresh account (Google SSO or a HelloFresh password account)
+- Playwright Chromium (`npx playwright install chromium`)
+- **A display** for the first Google sign-in (`login` tool or `npm run login`)
 
 ## Installation
 
@@ -32,13 +36,33 @@ npm install @striderlabs/mcp-hellofresh
 npx playwright install chromium
 ```
 
-## Configuration
+## Authentication (Google SSO)
 
-Set your HelloFresh credentials as environment variables:
+HelloFresh Google accounts **cannot** sign in with `HELLOFRESH_EMAIL` / `HELLOFRESH_PASSWORD`. This connector never stores, requests, or automates Google credentials. There is no `GOOGLE_PASSWORD` (or similar) setting.
+
+**One-time interactive login:**
+
+1. On a machine **with a screen**, from this package:
+   ```bash
+   npm run login
+   ```
+   or ask Claude to run the `login` tool (same headed Chromium window).
+2. In the window, click **Continue with Google** and finish Google's sign-in yourself (including 2FA).
+3. When HelloFresh shows a logged-in page, the tool saves Playwright `storageState` (HelloFresh cookies only, file mode `0600`) and closes the window.
+4. Later MCP calls reload that file, probe it, and reuse it until it expires.
+
+If the session expires, `auth_status` reports `valid: false` and other tools return `expired` / `missing_session` with *Session expired, run login again*. Repeat step 1. The server will **not** reopen Google SSO by itself.
+
+Default session path: `~/.config/mcp-hellofresh/session.json`  
+(Windows: `%APPDATA%\mcp-hellofresh\session.json`). Override with `HELLOFRESH_SESSION_PATH`.
+
+`login` / `npm run login` need a display. On Linux set `DISPLAY` (or Wayland). If the MCP client runs headless, use `npm run login` on a desktop, with `HELLOFRESH_SESSION_PATH` pointing at the same file the server reads.
+
+Optional fallback **only** for HelloFresh password accounts (not Google):
 
 ```bash
 export HELLOFRESH_EMAIL="your@email.com"
-export HELLOFRESH_PASSWORD="yourpassword"
+export HELLOFRESH_PASSWORD="your-hellofresh-password"
 ```
 
 ## Usage with Claude Desktop
@@ -50,15 +74,13 @@ Add to your `claude_desktop_config.json`:
   "mcpServers": {
     "hellofresh": {
       "command": "npx",
-      "args": ["-y", "@striderlabs/mcp-hellofresh"],
-      "env": {
-        "HELLOFRESH_EMAIL": "your@email.com",
-        "HELLOFRESH_PASSWORD": "yourpassword"
-      }
+      "args": ["-y", "@striderlabs/mcp-hellofresh"]
     }
   }
 }
 ```
+
+Google SSO users should omit `env`. After installing, run `npm run login` once (or call the `login` tool from Claude Desktop on a machine with a screen).
 
 Config file locations:
 - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
@@ -71,12 +93,13 @@ Config file locations:
 claude mcp add hellofresh -- npx -y @striderlabs/mcp-hellofresh
 ```
 
-Then set env vars or add them to the MCP config.
+Then run `npm run login` once with a display.
 
 ## Example Prompts
 
-Once connected, you can ask Claude:
+Once connected and logged in, you can ask Claude:
 
+- "Am I logged into HelloFresh?"
 - "What meals are available this week on HelloFresh?"
 - "Show me the recipe details and nutrition for the teriyaki salmon"
 - "Select the chicken tacos and mushroom pasta for next week's delivery"
@@ -88,6 +111,15 @@ Once connected, you can ask Claude:
 - "I just made the lemon herb chicken — rate it 4 stars"
 
 ## Tool Reference
+
+### `auth_status`
+No parameters. Returns session path, `savedAt`, HelloFresh cookie **count**, and `valid` — never cookie values.
+
+### `login`
+No parameters. Opens headed Chromium. Complete Google SSO in that window. Requires a display.
+
+### `logout`
+No parameters. Deletes the session file and closes Chromium.
 
 ### `get_menu`
 ```
@@ -155,15 +187,15 @@ comment (optional): Written review up to 500 chars
 
 ## How It Works
 
-This connector uses [Playwright](https://playwright.dev) browser automation to interact with the HelloFresh website on your behalf. It launches a headless Chromium browser, logs in with your credentials, and navigates the site to perform the requested actions.
+This connector uses [Playwright](https://playwright.dev) to drive the HelloFresh website. After you complete Google SSO once in a headed window, it reuses HelloFresh cookies from a local session file (headless) and probes that session before tools run. An expired session is not refreshed via Google; run `login` again. Password-account env vars, if set, may be used for a single automatic relogin.
 
-**Note**: This connector interacts with the HelloFresh website through browser automation. Website changes may affect functionality. Use responsibly and in accordance with HelloFresh's terms of service.
+**Note**: Website changes may affect functionality. Use responsibly and in accordance with HelloFresh's terms of service.
 
 ## Security
 
-- Credentials are passed via environment variables only — never hardcoded
-- The browser runs in headless mode with no persistent storage
-- Sessions are not saved between server restarts
+- Never store or automate Google credentials
+- Session file contains HelloFresh cookies only (Google cookies are stripped), mode `0600`, outside the git repo by default
+- HelloFresh email/password env vars are an optional fallback for non-SSO accounts only
 
 ## License
 

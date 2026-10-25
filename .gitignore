@@ -1,0 +1,7 @@
+node_modules/
+*.tgz
+dist-test/
+session.json
+*.session.json
+.mcp-hellofresh/
+

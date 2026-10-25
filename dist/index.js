@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-const index_js_1 = require("@modelcontextprotocol/sdk/server/index.js");
-const stdio_js_1 = require("@modelcontextprotocol/sdk/server/stdio.js");
-const types_js_1 = require("@modelcontextprotocol/sdk/types.js");
+const server_1 = require("@modelcontextprotocol/server");
+const stdio_1 = require("@modelcontextprotocol/server/stdio");
 const zod_1 = require("zod");
+const auth_js_1 = require("./auth.js");
 const browser_js_1 = require("./browser.js");
+const AUTH_TOOL_NAMES = new Set(["auth_status", "login", "logout"]);
 // ─── Schemas ──────────────────────────────────────────────────────────────────
 const GetMenuSchema = zod_1.z.object({
     week_offset: zod_1.z
-        .number()
         .int()
         .min(0)
         .max(4)
@@ -28,7 +28,6 @@ const SelectMealsSchema = zod_1.z.object({
         .array(zod_1.z.object({
         recipe_id: zod_1.z.string().describe("Recipe ID to select"),
         servings: zod_1.z
-            .number()
             .int()
             .min(1)
             .max(6)
@@ -71,14 +70,12 @@ const UpdatePreferencesSchema = zod_1.z.object({
 });
 const ModifySubscriptionSchema = zod_1.z.object({
     meals_per_week: zod_1.z
-        .number()
         .int()
         .min(2)
         .max(5)
         .optional()
         .describe("Number of meals per week (2-5)"),
     servings_per_meal: zod_1.z
-        .number()
         .int()
         .min(2)
         .max(4)
@@ -91,7 +88,6 @@ const ModifySubscriptionSchema = zod_1.z.object({
 });
 const GetPastOrdersSchema = zod_1.z.object({
     limit: zod_1.z
-        .number()
         .int()
         .min(1)
         .max(50)
@@ -102,7 +98,6 @@ const GetPastOrdersSchema = zod_1.z.object({
 const RateRecipeSchema = zod_1.z.object({
     recipe_id: zod_1.z.string().describe("The recipe ID to rate"),
     rating: zod_1.z
-        .number()
         .int()
         .min(1)
         .max(5)
@@ -116,13 +111,37 @@ const RateRecipeSchema = zod_1.z.object({
 // ─── Tool Definitions ─────────────────────────────────────────────────────────
 const TOOLS = [
     {
+        name: "auth_status",
+        description: "Show whether a HelloFresh session file exists, whether its cookies look valid, and when it was saved. Does not return cookie values. Google SSO users should run login if valid is false.",
+        inputSchema: {
+            type: "object",
+            properties: {},
+        },
+    },
+    {
+        name: "login",
+        description: "Open a headed Chromium window on the HelloFresh login page so you can complete Continue with Google yourself. Requires a display. Times out if sign-in is not finished. Never send Google passwords to this tool. If the MCP client cannot show a browser, run `npm run login` instead.",
+        inputSchema: {
+            type: "object",
+            properties: {},
+        },
+    },
+    {
+        name: "logout",
+        description: "Delete the saved HelloFresh session file and close the browser. Does not sign you out of Google.",
+        inputSchema: {
+            type: "object",
+            properties: {},
+        },
+    },
+    {
         name: "get_menu",
         description: "Get the current week's available recipes/meals from HelloFresh. Optionally specify a week offset to see future menus.",
         inputSchema: {
             type: "object",
             properties: {
                 week_offset: {
-                    type: "number",
+                    type: "integer",
                     description: "Week offset from current week (0 = current, 1 = next week, etc.)",
                     default: 0,
                     minimum: 0,
@@ -163,7 +182,7 @@ const TOOLS = [
                         properties: {
                             recipe_id: { type: "string", description: "Recipe ID to select" },
                             servings: {
-                                type: "number",
+                                type: "integer",
                                 description: "Number of servings (optional)",
                                 minimum: 1,
                                 maximum: 6,
@@ -272,13 +291,13 @@ const TOOLS = [
             type: "object",
             properties: {
                 meals_per_week: {
-                    type: "number",
+                    type: "integer",
                     description: "Number of meals per week (2-5)",
                     minimum: 2,
                     maximum: 5,
                 },
                 servings_per_meal: {
-                    type: "number",
+                    type: "integer",
                     description: "Number of servings per meal (2-4)",
                     minimum: 2,
                     maximum: 4,
@@ -298,7 +317,7 @@ const TOOLS = [
             type: "object",
             properties: {
                 limit: {
-                    type: "number",
+                    type: "integer",
                     description: "Maximum number of past orders to retrieve (default: 10, max: 50)",
                     default: 10,
                     minimum: 1,
@@ -318,7 +337,7 @@ const TOOLS = [
                     description: "The recipe ID to rate",
                 },
                 rating: {
-                    type: "number",
+                    type: "integer",
                     description: "Rating from 1 (poor) to 5 (excellent)",
                     minimum: 1,
                     maximum: 5,
@@ -337,49 +356,75 @@ const TOOLS = [
 class HelloFreshMCPServer {
     server;
     hellofresh;
-    initialized = false;
     constructor() {
-        this.server = new index_js_1.Server({ name: "@striderlabs/mcp-hellofresh", version: "1.0.0" }, { capabilities: { tools: {} } });
+        this.server = new server_1.Server({ name: "@striderlabs/mcp-hellofresh", version: "1.0.0" }, { capabilities: { tools: {} } });
         this.hellofresh = new browser_js_1.HelloFreshBrowser();
         this.setupHandlers();
     }
     async ensureInitialized() {
-        if (!this.initialized) {
-            const email = process.env.HELLOFRESH_EMAIL;
-            const password = process.env.HELLOFRESH_PASSWORD;
-            if (!email || !password) {
-                throw new Error("HELLOFRESH_EMAIL and HELLOFRESH_PASSWORD environment variables are required.");
-            }
-            const credentials = { email, password };
-            await this.hellofresh.init();
-            await this.hellofresh.login(credentials);
-            this.initialized = true;
-        }
+        await this.hellofresh.ensureReady((0, auth_js_1.readOptionalPasswordCredentials)());
     }
     setupHandlers() {
-        this.server.setRequestHandler(types_js_1.ListToolsRequestSchema, async () => ({
+        this.server.setRequestHandler("tools/list", async () => ({
             tools: TOOLS,
         }));
-        this.server.setRequestHandler(types_js_1.CallToolRequestSchema, async (request) => {
+        this.server.setRequestHandler("tools/call", async (request) => {
             const { name, arguments: args } = request.params;
             try {
-                await this.ensureInitialized();
+                if (!AUTH_TOOL_NAMES.has(name)) {
+                    await this.ensureInitialized();
+                }
                 return await this.handleTool(name, args ?? {});
             }
             catch (error) {
-                const message = error instanceof Error ? error.message : String(error);
-                return {
-                    content: [{ type: "text", text: `Error: ${message}` }],
-                    isError: true,
-                };
+                return (0, auth_js_1.formatAuthToolError)(error);
             }
         });
+    }
+    async notifyLoginWindow() {
+        if (!this.server.getClientCapabilities()?.elicitation) {
+            return;
+        }
+        try {
+            await this.server.elicitInput({
+                mode: "form",
+                message: auth_js_1.LOGIN_WINDOW_MESSAGE,
+                requestedSchema: {
+                    type: "object",
+                    properties: {},
+                },
+            });
+        }
+        catch {
+            // Client declined, timed out, or does not implement forms — login still proceeds.
+        }
     }
     async handleTool(name, args) {
         const text = (data) => ({
             content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
         });
         switch (name) {
+            case "auth_status": {
+                const status = await this.hellofresh.getAuthStatus();
+                return text(status);
+            }
+            case "login": {
+                void this.notifyLoginWindow();
+                const result = await this.hellofresh.interactiveLogin();
+                return text({
+                    ok: true,
+                    message: "HelloFresh session saved. Complete Google SSO is done; cookie values are not returned.",
+                    session_path: result.path,
+                    saved_at: result.savedAt,
+                });
+            }
+            case "logout": {
+                await this.hellofresh.logout();
+                return text({
+                    ok: true,
+                    message: "HelloFresh session deleted and browser closed.",
+                });
+            }
             case "get_menu": {
                 const params = GetMenuSchema.parse(args);
                 const menu = await this.hellofresh.getMenu(params.week_offset);
@@ -462,7 +507,7 @@ class HelloFreshMCPServer {
         }
     }
     async run() {
-        const transport = new stdio_js_1.StdioServerTransport();
+        const transport = new stdio_1.StdioServerTransport();
         await this.server.connect(transport);
         console.error("HelloFresh MCP server running on stdio");
         // Graceful shutdown
