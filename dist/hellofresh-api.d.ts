@@ -68,6 +68,8 @@ export declare class HelloFreshApi {
     private account;
     readonly country: HelloFreshCountry;
     private reloginTried;
+    /** Set when HelloFresh rejects the refresh token and password relogin cannot replace it. */
+    private refreshRejected;
     constructor(account: StoredAccount, fetchImpl: FetchLike, hooks?: {
         onUpdate?: (account: StoredAccount) => Promise<void>;
         /** Stdio only. HTTP never supplies a password relogin. */

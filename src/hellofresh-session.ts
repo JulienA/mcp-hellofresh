@@ -45,6 +45,10 @@ export class AccountClients {
   sessionFor(userId: string): HelloFreshSession {
     return {
       status: async () => {
+        const cached = this.clients.get(userId);
+        if (cached) {
+          return cached.status();
+        }
         const account = await this.store.load(userId);
         if (!account) {
           return SIGNED_OUT;
@@ -116,6 +120,9 @@ export function createStdioSession(
 
   return {
     status: async () => {
+      if (cached) {
+        return cached.status();
+      }
       const account = await readStoredAccount(path);
       if (!account) {
         return { ...SIGNED_OUT, reconnectRequired: true };
