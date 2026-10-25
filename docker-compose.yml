@@ -17,8 +17,6 @@ services:
     volumes:
       - hellofresh-data:/data
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "node -e \"require('net').connect(8080,'127.0.0.1',()=>process.exit(0)).on('error',()=>process.exit(1))\""]
 
 volumes:
   hellofresh-data:
