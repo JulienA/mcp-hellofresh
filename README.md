@@ -166,7 +166,7 @@ claude mcp add hellofresh -- npx -y @striderlabs/mcp-hellofresh
 
 `get_recipe_details`: `recipe_id` required.
 
-`select_meals`: `week_id` required, `meals` required (`recipe_id`, optional `servings`).
+`select_meals`: `week_id` required, `meals` required (`recipe_id`). Each recipe is added once. Portions per meal stay on the subscription plan.
 
 `skip_week`: `week_id` required.
 

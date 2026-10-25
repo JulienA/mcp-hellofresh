@@ -263,7 +263,11 @@ export class HelloFreshApi {
         throw new HelloFreshApiError("api", `Week ${weekId} was not found on this account.`);
       }
       const recipes = await this.recipesForWeek(subscription, week);
-      const selected = meals.map((meal) => {
+      // Cart quantity is how many times the recipe is in the box. Portions are the plan size.
+      // `servings` on the input is ignored so a 2-portion plan is not ordered as two copies.
+      const selected: Array<{ index: number; quantity: number }> = [];
+      const seen = new Set<number>();
+      for (const meal of meals) {
         const recipe = recipes.find((item) => item.id === meal.recipeId);
         if (!recipe || recipe.index === undefined) {
           throw new HelloFreshApiError(
@@ -271,12 +275,16 @@ export class HelloFreshApi {
             `Recipe ${meal.recipeId} is not on the menu for ${weekId}.`
           );
         }
-        const fallback = subscription.servings && subscription.servings > 0 ? subscription.servings : 1;
-        const quantity = meal.servings && meal.servings > 0 ? meal.servings : fallback;
-        return { index: recipe.index, quantity };
-      });
+        if (seen.has(recipe.index)) {
+          continue;
+        }
+        seen.add(recipe.index);
+        selected.push({ index: recipe.index, quantity: 1 });
+      }
+      const portions = planPortions(subscription);
+      const mealCount = cartMealCount(subscription, selected.length);
       const customerId = subscription.customerId;
-      const sku = resizeSku(week.sku || subscription.sku || "", selected.reduce((sum, meal) => sum + meal.quantity, 0));
+      const sku = await this.cartProductSku(subscription, mealCount, portions, week.sku);
       const cutoff = formatCutoff(week.cutoffDate);
       if (!customerId || !sku || !cutoff || !subscription.id) {
         throw new HelloFreshApiError(
@@ -298,7 +306,7 @@ export class HelloFreshApi {
         extras: [],
         meals: selected,
       }, { "x-requested-by": "shopping-experience-web" });
-      return { weekId, meals: selected, result: body ?? { ok: true } };
+      return { weekId, portionsPerMeal: portions ?? null, meals: selected, result: body ?? { ok: true } };
     });
   }
 
@@ -605,6 +613,23 @@ export class HelloFreshApi {
       }
     }
     return options;
+  }
+
+  private async cartProductSku(
+    subscription: SubscriptionRecord,
+    mealCount: number,
+    portions: number | undefined,
+    weekSku: string | undefined
+  ): Promise<string> {
+    if (portions && mealCount >= 2) {
+      const handle =
+        (await this.matchingProductHandle(subscription, mealCount, portions)) ||
+        resizePlanSku(subscription.sku || "", mealCount, portions);
+      if (handle) {
+        return handle;
+      }
+    }
+    return subscription.sku || weekSku || "";
   }
 
   private async matchingProductHandle(
@@ -1105,16 +1130,23 @@ function preferencesFromProfile(payload: unknown): Record<string, unknown> {
   };
 }
 
-function resizeSku(sku: string, mealCount: number): string {
-  const match = /^(?<prefix>.+-)(?<meals>\d+)(?<rest>-\d+-\d+)$/.exec(sku);
-  if (!match?.groups || mealCount < 2) {
-    return sku;
+function planPortions(subscription: SubscriptionRecord): number | undefined {
+  if (subscription.servings && subscription.servings > 0) {
+    return subscription.servings;
   }
-  const current = Number(match.groups.meals);
-  if (current <= 0 || current === mealCount) {
-    return sku;
+  const servings = skuSize(subscription.sku).servings;
+  return servings && servings > 0 ? servings : undefined;
+}
+
+function cartMealCount(subscription: SubscriptionRecord, selectedCount: number): number {
+  if (selectedCount >= 2) {
+    return selectedCount;
   }
-  return `${match.groups.prefix}${mealCount}${match.groups.rest}`;
+  const planMeals = subscription.meals ?? skuSize(subscription.sku).meals;
+  if (planMeals && planMeals >= 2) {
+    return planMeals;
+  }
+  return selectedCount;
 }
 
 function resizePlanSku(sku: string, meals: number, servings: number): string | undefined {

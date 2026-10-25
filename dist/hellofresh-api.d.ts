@@ -101,6 +101,7 @@ export declare class HelloFreshApi {
     private recipesForWeek;
     private patchDeliveryStatus;
     private deliveryOptions;
+    private cartProductSku;
     private matchingProductHandle;
     private query;
     private profileParams;

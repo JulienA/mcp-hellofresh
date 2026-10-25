@@ -28,16 +28,10 @@ const SelectMealsSchema = zod_1.z.object({
         .describe("The week identifier (e.g. '2024-W01') for the delivery"),
     meals: zod_1.z
         .array(zod_1.z.object({
-        recipe_id: zod_1.z.string().describe("Recipe ID to select"),
-        servings: zod_1.z
-            .int()
-            .min(1)
-            .max(6)
-            .optional()
-            .describe("Number of servings (defaults to subscription default)"),
+        recipe_id: zod_1.z.string().describe("Recipe ID to select once"),
     }))
         .min(1)
-        .describe("List of meals to select"),
+        .describe("Recipes to add once each. Portions per meal come from the subscription plan."),
 });
 const SkipWeekSchema = zod_1.z.object({
     week_id: zod_1.z.string().describe("The week identifier to skip (e.g. '2024-W01')"),
@@ -168,7 +162,7 @@ const TOOLS = [
     },
     {
         name: "select_meals",
-        description: "Choose specific meals for an upcoming delivery week. You can select multiple recipes by their IDs.",
+        description: "Choose specific meals for an upcoming delivery week. Each recipe is added once. Portions per meal come from the subscription plan, not from this call. Use modify_subscription to change how many portions every meal includes.",
         inputSchema: {
             type: "object",
             properties: {
@@ -178,17 +172,11 @@ const TOOLS = [
                 },
                 meals: {
                     type: "array",
-                    description: "List of meals to select",
+                    description: "Recipes to add once each. Portions per meal come from the subscription plan.",
                     items: {
                         type: "object",
                         properties: {
-                            recipe_id: { type: "string", description: "Recipe ID to select" },
-                            servings: {
-                                type: "integer",
-                                description: "Number of servings (optional)",
-                                minimum: 1,
-                                maximum: 6,
-                            },
+                            recipe_id: { type: "string", description: "Recipe ID to select once" },
                         },
                         required: ["recipe_id"],
                     },
@@ -464,7 +452,7 @@ class HelloFreshMCPServer {
             }
             case "select_meals": {
                 const params = SelectMealsSchema.parse(args);
-                const result = await (await this.session.api()).selectMeals(params.week_id, params.meals.map((m) => ({ recipeId: m.recipe_id, servings: m.servings })));
+                const result = await (await this.session.api()).selectMeals(params.week_id, params.meals.map((m) => ({ recipeId: m.recipe_id })));
                 return text(result);
             }
             case "skip_week": {
