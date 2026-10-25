@@ -50,6 +50,7 @@ const MAX_RECIPE_IMAGE_BYTES = 2 * 1024 * 1024;
 /** Shared across accounts. Recipe JSON is catalog data for a country and locale, not a user. */
 export const RECIPE_DETAILS_TTL_MS = 30 * 60 * 1000;
 const RECIPE_DETAILS_CACHE_MAX = 256;
+const MENU_RECIPE_CONCURRENCY = 4;
 
 interface RecipeDetailsContext {
   load: () => Promise<Record<string, unknown>>;
@@ -88,7 +89,19 @@ export interface RecipeSummary {
   /** Card badge, such as "Rapide". Omitted when there is none. */
   label?: string;
   tags: string[];
+  /** kcal per portion, or null when HelloFresh did not send one. */
+  calories: number | null;
+  /** Allergens in the recipe. Traces are listed separately. */
+  allergens: string[];
+  /** Allergens present only as traces. The generic traces banner is omitted. */
+  allergenTraces: string[];
   index?: number;
+}
+
+interface MenuRecipeDraft {
+  summary: RecipeSummary;
+  caloriesFromMenu: boolean;
+  allergensFromMenu: boolean;
 }
 
 export interface RecipeImage {
@@ -283,7 +296,7 @@ export class HelloFreshApi {
       if (!week) {
         throw new HelloFreshApiError("api", `No HelloFresh menu week at offset ${weekOffset}.`);
       }
-      const recipes = await this.recipesForWeek(subscription, week);
+      const recipes = await this.recipesForWeek(subscription, week, true);
       return { weekId: week.weekId, recipes };
     });
   }
@@ -653,25 +666,72 @@ export class HelloFreshApi {
     }
   }
 
-  private async recipesForWeek(subscription: SubscriptionRecord, week: WeekRecord): Promise<RecipeSummary[]> {
-    const embedded = recipesFromPayload(week.raw);
+  private async recipesForWeek(
+    subscription: SubscriptionRecord,
+    week: WeekRecord,
+    withNutrition = false
+  ): Promise<RecipeSummary[]> {
+    const french = frenchTagLabels(this.country.code);
+    const embedded = recipesFromPayload(week.raw, french);
     const params = menuParams(subscription, week);
-    if (!params) {
-      return embedded;
-    }
-    try {
-      const payload = await this.getJson("/gw/my-deliveries/menu", params);
-      if (payload && typeof payload === "object" && "week" in payload && payload.week && payload.week !== week.weekId) {
-        return embedded;
+    let drafts = embedded;
+    if (params) {
+      try {
+        const payload = await this.getJson("/gw/my-deliveries/menu", params);
+        const wrongWeek =
+          payload && typeof payload === "object" && "week" in payload && payload.week && payload.week !== week.weekId;
+        if (!wrongWeek) {
+          const fromMenu = recipesFromPayload(payload, french);
+          if (fromMenu.length > 0) {
+            drafts = fromMenu;
+          }
+        }
+      } catch (error) {
+        if (embedded.length === 0) {
+          throw error;
+        }
       }
-      const fromMenu = recipesFromPayload(payload);
-      return fromMenu.length > 0 ? fromMenu : embedded;
-    } catch (error) {
-      if (embedded.length > 0) {
-        return embedded;
-      }
-      throw error;
     }
+    if (withNutrition) {
+      await this.enrichMenuNutrition(drafts);
+    }
+    return drafts.map((draft) => draft.summary);
+  }
+
+  private async enrichMenuNutrition(drafts: MenuRecipeDraft[]): Promise<void> {
+    const queue = drafts.filter((draft) => !draft.caloriesFromMenu || !draft.allergensFromMenu);
+    if (queue.length === 0) {
+      return;
+    }
+    let cursor = 0;
+    let stopped = false;
+    const worker = async (): Promise<void> => {
+      while (!stopped) {
+        const index = cursor;
+        cursor += 1;
+        if (index >= queue.length) {
+          return;
+        }
+        const draft = queue[index];
+        try {
+          const details = await this.loadRecipe(draft.summary.id);
+          const nutrition = nutritionFromRecipe(details);
+          if (!draft.caloriesFromMenu && nutrition.calories !== null) {
+            draft.summary.calories = nutrition.calories;
+          }
+          if (!draft.allergensFromMenu && nutrition.allergens) {
+            draft.summary.allergens = nutrition.allergens;
+            draft.summary.allergenTraces = nutrition.allergenTraces ?? [];
+          }
+        } catch (error) {
+          if (error instanceof HelloFreshApiError && error.code === "rate_limited") {
+            stopped = true;
+          }
+        }
+      }
+    };
+    const workers = Math.min(MENU_RECIPE_CONCURRENCY, queue.length);
+    await Promise.all(Array.from({ length: workers }, () => worker()));
   }
 
   private async patchDeliveryStatus(week: WeekRecord, status: string): Promise<void> {
@@ -1254,42 +1314,213 @@ function recipeLabel(recipe: Record<string, unknown>): string | undefined {
   return stringField(label, ["text", "name"])?.trim();
 }
 
-function recipeTags(recipe: Record<string, unknown>, label: string | undefined): string[] {
+const HIDDEN_TAGS = new Set([
+  "ineligible-reco",
+  "ineligible-for-recommendation",
+  "premium-ptn-variety",
+]);
+
+const TAG_LABELS: Record<string, { fr: string; en: string }> = {
+  "pork-free": { fr: "Sans porc", en: "Pork-free" },
+  "classic-plates": { fr: "Assiettes classiques", en: "Classic plates" },
+  "regional-specialty": { fr: "Spécialité régionale", en: "Regional specialty" },
+  new: { fr: "Nouveau", en: "New" },
+  handhelds: { fr: "À la main", en: "Handhelds" },
+  "winter-warmers": { fr: "Plats d'hiver", en: "Winter warmers" },
+  "certified-product": { fr: "Produit certifié", en: "Certified product" },
+  "dinner-bowls": { fr: "Bowls", en: "Dinner bowls" },
+  "premium-ingredient": { fr: "Ingrédient premium", en: "Premium ingredient" },
+  "world-flavors": { fr: "Saveurs du monde", en: "World flavors" },
+  "culinary-technique": { fr: "Technique culinaire", en: "Culinary technique" },
+};
+
+function frenchTagLabels(countryCode: string): boolean {
+  return countryCode === "fr" || countryCode === "lu";
+}
+
+function isKebabSlug(value: string): boolean {
+  return /^[a-z0-9]+(?:-[a-z0-9]+)+$/.test(value);
+}
+
+function isTagKey(value: string): boolean {
+  return isKebabSlug(value) || Boolean(TAG_LABELS[value]) || HIDDEN_TAGS.has(value);
+}
+
+interface ParsedTag {
+  name: string;
+  keys: string[];
+  display: boolean | undefined;
+}
+
+function parsedTag(tag: unknown): ParsedTag | undefined {
+  if (typeof tag === "string") {
+    const name = tag.trim();
+    if (!name) {
+      return undefined;
+    }
+    const key = name.toLowerCase();
+    return { name, keys: isTagKey(key) ? [key] : [], display: undefined };
+  }
+  const record = asRecord(tag);
+  if (!record) {
+    return undefined;
+  }
+  const name = stringField(record, ["name", "type", "slug"])?.trim();
+  if (!name) {
+    return undefined;
+  }
+  const keys: string[] = [];
+  for (const value of [stringField(record, ["type"]), stringField(record, ["slug"]), stringField(record, ["name"])]) {
+    const key = value?.trim().toLowerCase();
+    if (key && isTagKey(key) && !keys.includes(key)) {
+      keys.push(key);
+    }
+  }
+  const display = record.displayLabel;
+  return { name, keys, display: typeof display === "boolean" ? display : undefined };
+}
+
+function tagLabel(tag: ParsedTag, french: boolean): string | undefined {
+  const translation = tag.keys.map((key) => TAG_LABELS[key]).find((item) => item);
+  const nameKey = tag.name.toLowerCase();
+  const nameIsSlug = isTagKey(nameKey);
+  if (translation && nameIsSlug) {
+    return french ? translation.fr : translation.en;
+  }
+  if (nameIsSlug) {
+    return tag.display === true ? tag.name : undefined;
+  }
+  return tag.name;
+}
+
+function recipeTags(recipe: Record<string, unknown>, label: string | undefined, french: boolean): string[] {
   if (!Array.isArray(recipe.tags)) {
     return [];
   }
   const named = recipe.tags.flatMap((tag) => {
-    if (typeof tag === "string") {
-      const name = tag.trim();
-      return name ? [{ name, display: undefined as boolean | undefined }] : [];
-    }
-    const record = asRecord(tag);
-    const name = record ? stringField(record, ["name", "type", "slug"])?.trim() : undefined;
-    if (!record || !name) {
-      return [];
-    }
-    const display = record.displayLabel;
-    return [{ name, display: typeof display === "boolean" ? display : undefined }];
+    const parsed = parsedTag(tag);
+    return parsed ? [parsed] : [];
   });
-  const displayed = named.filter((tag) => tag.display === true);
-  const source = displayed.length > 0 ? displayed : named;
+  const eligible = named.filter((tag) => tag.display !== false && !tag.keys.some((key) => HIDDEN_TAGS.has(key)));
+  const displayed = eligible.filter((tag) => tag.display === true);
+  const source = displayed.length > 0 ? displayed : eligible;
   const tags: string[] = [];
   const labelKey = label?.toLocaleLowerCase();
   for (const tag of source) {
-    const key = tag.name.toLocaleLowerCase();
+    const text = tagLabel(tag, french);
+    if (!text) {
+      continue;
+    }
+    const key = text.toLocaleLowerCase();
     if (key === labelKey || tags.some((item) => item.toLocaleLowerCase() === key)) {
       continue;
     }
-    tags.push(tag.name);
+    tags.push(text);
   }
   return tags;
 }
 
-function recipesFromPayload(payload: unknown): RecipeSummary[] {
+interface RecipeNutrition {
+  calories: number | null;
+  allergens: string[] | null;
+  allergenTraces: string[] | null;
+}
+
+function nutritionFromRecipe(recipe: Record<string, unknown>): RecipeNutrition {
+  return {
+    calories: caloriesFromNutrition(recipe.nutrition),
+    ...allergensFromList(recipe.allergens),
+  };
+}
+
+function caloriesFromNutrition(nutrition: unknown): number | null {
+  if (Array.isArray(nutrition)) {
+    for (const item of nutrition) {
+      const record = asRecord(item);
+      if (!record) {
+        continue;
+      }
+      const unit = stringField(record, ["unit"])?.toLowerCase() ?? "";
+      const name = stringField(record, ["name"])?.toLowerCase() ?? "";
+      if (unit === "kj" || name.includes("(kj)") || name.endsWith(" kj")) {
+        continue;
+      }
+      const amount = numberField(record, ["amount", "value"]);
+      if (amount === undefined) {
+        continue;
+      }
+      if (unit === "kcal" || name.includes("kcal") || name.includes("calorie")) {
+        return amount;
+      }
+    }
+    return null;
+  }
+  const record = asRecord(nutrition);
+  if (!record) {
+    return null;
+  }
+  return numberField(record, ["calories", "energyKcal", "kcal"]) ?? null;
+}
+
+function allergensFromList(value: unknown): { allergens: string[] | null; allergenTraces: string[] | null } {
+  if (!Array.isArray(value)) {
+    return { allergens: null, allergenTraces: null };
+  }
+  const allergens: string[] = [];
+  const allergenTraces: string[] = [];
+  for (const item of value) {
+    if (typeof item === "string") {
+      const name = item.trim();
+      if (name && !isGenericAllergenBanner({}, name)) {
+        allergens.push(name);
+      }
+      continue;
+    }
+    const record = asRecord(item);
+    if (!record) {
+      continue;
+    }
+    const name = stringField(record, ["name"])?.trim();
+    if (!name || isGenericAllergenBanner(record, name)) {
+      continue;
+    }
+    if (record.tracesOf === true) {
+      allergenTraces.push(name);
+    } else {
+      allergens.push(name);
+    }
+  }
+  return { allergens: uniqueNames(allergens), allergenTraces: uniqueNames(allergenTraces) };
+}
+
+function isGenericAllergenBanner(record: Record<string, unknown>, name: string): boolean {
+  const type = stringField(record, ["type"])?.toLowerCase();
+  const slug = stringField(record, ["slug"])?.toLowerCase();
+  if (type === "maycontaintracesofallergens" || slug === "peut-contenir-des-traces-dallergenes") {
+    return true;
+  }
+  return /peut contenir des traces d['’]allerg/i.test(name);
+}
+
+function uniqueNames(names: string[]): string[] {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const name of names) {
+    const key = name.toLocaleLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    unique.push(name);
+  }
+  return unique;
+}
+
+function recipesFromPayload(payload: unknown, french: boolean): MenuRecipeDraft[] {
   const meals = [
     ...asList(payload, ["meals", "courses", "recipes", "items"]),
   ];
-  const recipes: RecipeSummary[] = [];
+  const recipes: MenuRecipeDraft[] = [];
   for (const meal of meals) {
     const record = asRecord(meal);
     if (!record) {
@@ -1302,15 +1533,23 @@ function recipesFromPayload(payload: unknown): RecipeSummary[] {
       continue;
     }
     const label = recipeLabel(recipe);
+    const nutrition = nutritionFromRecipe(recipe);
     recipes.push({
-      id,
-      name,
-      description: stringField(recipe, ["headline", "description"]) ?? "",
-      imageUrl: stringField(recipe, ["imagePath", "image", "imageUrl"]),
-      prepTime: prepMinutes(recipe),
-      ...(label ? { label } : {}),
-      tags: recipeTags(recipe, label),
-      index: numberField(record, ["index"]),
+      caloriesFromMenu: nutrition.calories !== null,
+      allergensFromMenu: nutrition.allergens !== null,
+      summary: {
+        id,
+        name,
+        description: stringField(recipe, ["headline", "description"]) ?? "",
+        imageUrl: stringField(recipe, ["imagePath", "image", "imageUrl"]),
+        prepTime: prepMinutes(recipe),
+        ...(label ? { label } : {}),
+        tags: recipeTags(recipe, label, french),
+        calories: nutrition.calories,
+        allergens: nutrition.allergens ?? [],
+        allergenTraces: nutrition.allergenTraces ?? [],
+        index: numberField(record, ["index"]),
+      },
     });
   }
   return recipes;

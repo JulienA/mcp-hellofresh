@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { userIdFor } from "./accounts.js";
 import { ACCESS_TOKEN_TTL_SEC, type HttpRuntimeConfig } from "./config.js";
-import type { FetchLike } from "./hellofresh-api.js";
+import { clearRecipeDetailsCache, type FetchLike } from "./hellofresh-api.js";
 import { startHttpServer, type HttpServerHandle } from "./http.js";
 import { captureLogLines, setLogLevel, setLogSink } from "./log.js";
 import { OAuthStore } from "./oauth-store.js";
@@ -704,6 +704,8 @@ describe("/mcp authentication", () => {
   it("returns the recipe photo as image content", async () => {
     await withServer({}, async (handle, calls) => {
       const { accessToken } = await completePkce(handle);
+      // An earlier get_menu warms the shared recipe cache, so this request must start cold.
+      clearRecipeDetailsCache();
       calls.length = 0;
       const result = await toolCall(handle, accessToken, "get_recipe_image", { recipe_id: "recipe-1" });
       assert.equal(result.isError, undefined);
