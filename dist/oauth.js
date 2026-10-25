@@ -9,6 +9,7 @@ const server_1 = require("@modelcontextprotocol/server");
 const config_js_1 = require("./config.js");
 const countries_js_1 = require("./countries.js");
 const hellofresh_api_js_1 = require("./hellofresh-api.js");
+const log_js_1 = require("./log.js");
 const accounts_js_1 = require("./accounts.js");
 const security_js_1 = require("./security.js");
 Object.defineProperty(exports, "timingSafeEqualString", { enumerable: true, get: function () { return security_js_1.timingSafeEqualString; } });
@@ -209,6 +210,7 @@ class OwnerAuthorizationServer {
         }
         for (const uri of redirectUris) {
             if (!(0, config_js_1.redirectHostnameAllowed)(uri, this.config.redirectHosts, this.config.allowLoopbackRedirects)) {
+                log_js_1.log.warn("oauth.register", { outcome: "rejected", reason: "redirect_uri" });
                 return oauthErrorResponse(new server_1.OAuthError(server_1.OAuthErrorCode.InvalidRedirectUri, `redirect_uri is not allowed: ${uri}`));
             }
         }
@@ -237,6 +239,11 @@ class OwnerAuthorizationServer {
             issuedAt,
         };
         await this.store.putClient(client);
+        log_js_1.log.info("oauth.register", {
+            clientId,
+            clientName: client.clientName,
+            redirectHosts: uniqueRedirectHosts(redirectUris),
+        });
         return oauthJson({
             client_id: clientId,
             client_id_issued_at: issuedAt,
@@ -275,6 +282,7 @@ class OwnerAuthorizationServer {
         }
         const client = await this.store.getClient(clientId);
         if (!client) {
+            log_js_1.log.warn("oauth.authorize", { outcome: "rejected", reason: "unknown_client" });
             return htmlError(400, "Unknown client_id");
         }
         if (!client.redirectUris.includes(redirectUri)) {
@@ -300,6 +308,7 @@ class OwnerAuthorizationServer {
             scopes: scope.split(/[+\s]+/).filter(Boolean),
             expiresAt: Date.now() + config_js_1.AUTH_CODE_TTL_SEC * 1000,
         });
+        log_js_1.log.info("oauth.authorize", { outcome: "form", clientId });
         return this.renderAuthorize(id);
     }
     renderAuthorize(requestId, error) {
@@ -367,6 +376,7 @@ class OwnerAuthorizationServer {
         const form = await readFormOrJson(request);
         const emailKey = form.email ? `email:${(0, accounts_js_1.normalizeEmail)(form.email)}` : undefined;
         if (this.rateLimiter.tooMany(ip) || (emailKey && this.rateLimiter.tooMany(emailKey))) {
+            log_js_1.log.warn("oauth.authorize", { outcome: "rate_limited" });
             return oauthErrorResponse(new server_1.OAuthError(server_1.OAuthErrorCode.TooManyRequests, "Too many authorize attempts"), 429);
         }
         this.rateLimiter.record(ip);
@@ -376,6 +386,7 @@ class OwnerAuthorizationServer {
         const pending = this.pending.get(form.request_id ?? "");
         if (!pending || pending.expiresAt < Date.now()) {
             this.pending.delete(form.request_id ?? "");
+            log_js_1.log.warn("oauth.authorize", { outcome: "expired" });
             return htmlError(400, "Authorization request expired. Start again from the client.");
         }
         const method = form.auth_method === "token" ? "token" : "password";
@@ -398,15 +409,25 @@ class OwnerAuthorizationServer {
             }
         }
         catch (error) {
+            const code = (0, log_js_1.errorCode)(error);
             if (error instanceof hellofresh_api_js_1.HelloFreshApiError && error.code === "rate_limited") {
+                log_js_1.log.warn("oauth.authorize", { outcome: "rate_limited", method, country: form.country });
                 return oauthErrorResponse(new server_1.OAuthError(server_1.OAuthErrorCode.TooManyRequests, "Too many authorize attempts"), 429);
             }
+            log_js_1.log.warn("oauth.authorize", { outcome: "rejected", method, country: form.country, code });
             const message = error instanceof hellofresh_api_js_1.HelloFreshApiError
                 ? error.message
                 : "HelloFresh did not accept these credentials.";
             return this.renderAuthorize(pending.id, message);
         }
         this.pending.delete(pending.id);
+        log_js_1.log.info("oauth.authorize", {
+            outcome: "linked",
+            method,
+            country: form.country,
+            userId,
+            clientId: pending.clientId,
+        });
         const code = (0, security_js_1.randomToken)(32);
         this.codes.set((0, security_js_1.sha256Hex)(code), {
             clientId: pending.clientId,
@@ -478,6 +499,12 @@ class OwnerAuthorizationServer {
         }
         catch (error) {
             if (error instanceof server_1.OAuthError) {
+                log_js_1.log.warn("oauth.token", {
+                    grantType: body.grant_type,
+                    outcome: "rejected",
+                    code: error.code,
+                    clientId,
+                });
                 return oauthErrorResponse(error);
             }
             throw error;
@@ -520,7 +547,14 @@ class OwnerAuthorizationServer {
         if (!resourcesEqual(resource, stored.resource)) {
             throw new server_1.OAuthError(server_1.OAuthErrorCode.InvalidTarget, "resource does not match the authorization");
         }
-        return this.issueTokens(client.clientId, stored.userId, stored.scopes, stored.resource);
+        const issued = await this.issueTokens(client.clientId, stored.userId, stored.scopes, stored.resource);
+        log_js_1.log.info("oauth.token", {
+            grantType: "authorization_code",
+            outcome: "issued",
+            clientId: client.clientId,
+            userId: stored.userId,
+        });
+        return issued;
     }
     async rotateRefresh(client, body) {
         const refreshToken = body.refresh_token;
@@ -544,10 +578,17 @@ class OwnerAuthorizationServer {
         if (!resourcesEqual(resource, record.resource)) {
             throw new server_1.OAuthError(server_1.OAuthErrorCode.InvalidTarget, "resource does not match the refresh token");
         }
-        return this.issueTokens(client.clientId, record.userId, record.scopes, record.resource, {
+        const issued = await this.issueTokens(client.clientId, record.userId, record.scopes, record.resource, {
             replaceAccessHash: record.accessHash,
             replaceRefreshHash: (0, security_js_1.sha256Hex)(refreshToken),
         });
+        log_js_1.log.info("oauth.token", {
+            grantType: "refresh_token",
+            outcome: "issued",
+            clientId: client.clientId,
+            userId: record.userId,
+        });
+        return issued;
     }
     async issueTokens(clientId, userId, scopes, resource, replace) {
         const accessToken = `mcp_${(0, security_js_1.randomToken)(32)}`;
@@ -581,6 +622,7 @@ class OwnerAuthorizationServer {
         if (body.token) {
             await this.store.revokeToken(body.token);
         }
+        log_js_1.log.info("oauth.revoke", { revoked: Boolean(body.token) });
         return new Response(null, { status: 200, headers: { "Access-Control-Allow-Origin": "*" } });
     }
 }
@@ -596,6 +638,21 @@ function normalizeResource(value) {
         href = href.slice(0, -1);
     }
     return href;
+}
+function uniqueRedirectHosts(uris) {
+    const hosts = [];
+    for (const uri of uris) {
+        try {
+            const host = new URL(uri).hostname.toLowerCase();
+            if (host && !hosts.includes(host)) {
+                hosts.push(host);
+            }
+        }
+        catch {
+            // Skip unparseable redirect URIs; the allowlist already rejected bad ones.
+        }
+    }
+    return hosts;
 }
 function htmlError(status, message) {
     const body = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Authorization error</title></head><body><p>${(0, security_js_1.htmlEscape)(message)}</p></body></html>`;

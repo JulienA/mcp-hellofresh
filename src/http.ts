@@ -15,11 +15,16 @@ import { createAccountLinker, type AccountLinker } from "./account-linker.js";
 import type { HttpRuntimeConfig } from "./config.js";
 import type { FetchLike } from "./hellofresh-api.js";
 import { AccountClients } from "./hellofresh-session.js";
+import { log, logPath, newRequestId } from "./log.js";
 import { HelloFreshMCPServer } from "./mcp-server.js";
 import { sendWebResponse, toWebRequest } from "./node-http.js";
 import { OwnerAuthorizationServer, buildAuthorizationServerMetadata } from "./oauth.js";
 import { OAuthStore } from "./oauth-store.js";
-import { currentHelloFreshUserId, helloFreshUserContext } from "./request-context.js";
+import {
+  currentHelloFreshUserId,
+  helloFreshUserContext,
+  requestLogContext,
+} from "./request-context.js";
 
 export interface HttpServerHandle {
   server: http.Server;
@@ -153,21 +158,34 @@ export async function startHttpServer(
 
   server.on("request", (req, res) => {
     void (async () => {
-      try {
-        const request = toWebRequest(req, resolved.issuer);
-        const response = await fetchHandler(request);
-        await sendWebResponse(res, response);
-      } catch (error) {
-        if (!res.headersSent) {
-          res.statusCode = 500;
-          res.setHeader("Content-Type", "text/plain");
-          res.end("Internal Server Error");
-        } else {
-          res.destroy();
+      const requestId = newRequestId();
+      const started = Date.now();
+      const method = req.method ?? "GET";
+      const path = logPath(req.url ?? "/");
+      await requestLogContext.run({ requestId }, async () => {
+        try {
+          const request = toWebRequest(req, resolved.issuer);
+          const response = await fetchHandler(request);
+          await sendWebResponse(res, response);
+          logHttpRequest(method, path, response.status, Date.now() - started);
+        } catch (error) {
+          if (!res.headersSent) {
+            res.statusCode = 500;
+            res.setHeader("Content-Type", "text/plain");
+            res.end("Internal Server Error");
+          } else {
+            res.destroy();
+          }
+          const message = error instanceof Error ? error.message : String(error);
+          log.error("http.error", {
+            method,
+            path,
+            status: 500,
+            durationMs: Date.now() - started,
+            err: message,
+          });
         }
-        const message = error instanceof Error ? error.message : String(error);
-        console.error(`HTTP handler error: ${message}`);
-      }
+      });
     })();
   });
 
@@ -184,6 +202,23 @@ export async function startHttpServer(
     config: resolved,
     close,
   };
+}
+
+function logHttpRequest(method: string, path: string, status: number, durationMs: number): void {
+  const fields = { method, path, status, durationMs };
+  if (path === "/healthz") {
+    log.debug("http.request", fields);
+    return;
+  }
+  if (status >= 500) {
+    log.error("http.request", fields);
+    return;
+  }
+  if (status >= 400) {
+    log.warn("http.request", fields);
+    return;
+  }
+  log.info("http.request", fields);
 }
 
 function userIdFromAuth(auth: AuthInfo | undefined): string | undefined {

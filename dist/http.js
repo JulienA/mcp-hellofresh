@@ -9,6 +9,7 @@ const server_1 = require("@modelcontextprotocol/server");
 const accounts_js_1 = require("./accounts.js");
 const account_linker_js_1 = require("./account-linker.js");
 const hellofresh_session_js_1 = require("./hellofresh-session.js");
+const log_js_1 = require("./log.js");
 const mcp_server_js_1 = require("./mcp-server.js");
 const node_http_js_1 = require("./node-http.js");
 const oauth_js_1 = require("./oauth.js");
@@ -113,23 +114,36 @@ async function startHttpServer(config, options = {}) {
     };
     server.on("request", (req, res) => {
         void (async () => {
-            try {
-                const request = (0, node_http_js_1.toWebRequest)(req, resolved.issuer);
-                const response = await fetchHandler(request);
-                await (0, node_http_js_1.sendWebResponse)(res, response);
-            }
-            catch (error) {
-                if (!res.headersSent) {
-                    res.statusCode = 500;
-                    res.setHeader("Content-Type", "text/plain");
-                    res.end("Internal Server Error");
+            const requestId = (0, log_js_1.newRequestId)();
+            const started = Date.now();
+            const method = req.method ?? "GET";
+            const path = (0, log_js_1.logPath)(req.url ?? "/");
+            await request_context_js_1.requestLogContext.run({ requestId }, async () => {
+                try {
+                    const request = (0, node_http_js_1.toWebRequest)(req, resolved.issuer);
+                    const response = await fetchHandler(request);
+                    await (0, node_http_js_1.sendWebResponse)(res, response);
+                    logHttpRequest(method, path, response.status, Date.now() - started);
                 }
-                else {
-                    res.destroy();
+                catch (error) {
+                    if (!res.headersSent) {
+                        res.statusCode = 500;
+                        res.setHeader("Content-Type", "text/plain");
+                        res.end("Internal Server Error");
+                    }
+                    else {
+                        res.destroy();
+                    }
+                    const message = error instanceof Error ? error.message : String(error);
+                    log_js_1.log.error("http.error", {
+                        method,
+                        path,
+                        status: 500,
+                        durationMs: Date.now() - started,
+                        err: message,
+                    });
                 }
-                const message = error instanceof Error ? error.message : String(error);
-                console.error(`HTTP handler error: ${message}`);
-            }
+            });
         })();
     });
     const close = async () => {
@@ -144,6 +158,22 @@ async function startHttpServer(config, options = {}) {
         config: resolved,
         close,
     };
+}
+function logHttpRequest(method, path, status, durationMs) {
+    const fields = { method, path, status, durationMs };
+    if (path === "/healthz") {
+        log_js_1.log.debug("http.request", fields);
+        return;
+    }
+    if (status >= 500) {
+        log_js_1.log.error("http.request", fields);
+        return;
+    }
+    if (status >= 400) {
+        log_js_1.log.warn("http.request", fields);
+        return;
+    }
+    log_js_1.log.info("http.request", fields);
 }
 function userIdFromAuth(auth) {
     const userId = auth?.extra?.userId;

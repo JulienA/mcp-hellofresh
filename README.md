@@ -79,8 +79,11 @@ MCP access tokens last one hour (`ACCESS_TOKEN_TTL_SEC`). Refresh tokens last 30
 | `MCP_OAUTH_ALLOW_LOOPBACK` | no | Set `0` to refuse loopback redirect URIs (`localhost`, `127.0.0.1`, `::1`) |
 | `MCP_AUTHORIZE_MAX_ATTEMPTS` | no | Authorize attempts in the window (default `10`) |
 | `MCP_AUTHORIZE_WINDOW_MS` | no | Rate-limit window in ms (default `900000`, 15 minutes) |
+| `LOG_LEVEL` | no | `debug`, `info` (default), `warn`, or `error`. JSON lines on stderr. `/healthz` is `debug`. |
 
 The default is 10 attempts per 900000 ms (15 minutes). The key is the first `X-Forwarded-For` entry, otherwise `cf-connecting-ip`, otherwise one shared bucket named `local`. Password sign-in is also counted per email. A pasted `apiV2Auth` is counted only on that header key. The TCP peer address is not the key.
+
+JSON logs go to stderr (`docker compose logs`). Each line has `ts`, `level`, and `msg` (`http.request`, `oauth.authorize`, `oauth.token`, `mcp.tool`, `hellofresh.request`). They include method, path, status, duration, OAuth outcome, tool name, and a truncated account id. They do not include passwords, tokens, emails, or `Authorization` headers. `/healthz` is logged at `debug`.
 
 Endpoints: `/mcp` (the handler accepts the MCP methods after bearer auth), `GET /healthz`, and OAuth (`/.well-known/oauth-protected-resource`, `/.well-known/oauth-authorization-server`, `/authorize`, `/token`, `/register`). Redirect URIs are allowlisted.
 

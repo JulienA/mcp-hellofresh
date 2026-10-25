@@ -4,7 +4,9 @@ import { z } from "zod";
 import { AuthError, formatAuthToolError, LOGIN_WINDOW_MESSAGE } from "./auth.js";
 import { HelloFreshApiError, RATE_RECIPE_UNSUPPORTED } from "./hellofresh-api.js";
 import type { HelloFreshSession } from "./hellofresh-session.js";
+import { errorCode, log } from "./log.js";
 import { assertInteractiveLoginAllowed, HTTP_LOGIN_MESSAGE } from "./login-mode.js";
+import { currentHelloFreshUserId } from "./request-context.js";
 
 export interface HelloFreshMCPServerOptions {
   /** False for HTTP/headless deployments — the login tool must not open a browser. */
@@ -410,10 +412,25 @@ export class HelloFreshMCPServer {
 
     this.server.setRequestHandler("tools/call", async (request) => {
       const { name, arguments: args } = request.params;
-
+      const started = Date.now();
+      const userId = currentHelloFreshUserId();
       try {
-        return await this.handleTool(name, args ?? {});
+        const result = await this.handleTool(name, args ?? {});
+        log.info("mcp.tool", {
+          name,
+          userId,
+          durationMs: Date.now() - started,
+          ok: true,
+        });
+        return result;
       } catch (error) {
+        log.warn("mcp.tool", {
+          name,
+          userId,
+          durationMs: Date.now() - started,
+          ok: false,
+          code: errorCode(error),
+        });
         return formatAuthToolError(error);
       }
     });
@@ -587,7 +604,7 @@ export class HelloFreshMCPServer {
   async runStdio(): Promise<void> {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
-    console.error("HelloFresh MCP server running on stdio");
+    log.info("stdio.listen");
 
     const shutdown = () => {
       process.exit(0);

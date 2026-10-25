@@ -1,5 +1,6 @@
 import { AccountStore, parseApiV2Auth } from "./accounts.js";
 import { HelloFreshApi, type FetchLike } from "./hellofresh-api.js";
+import { log } from "./log.js";
 
 export interface AccountLinker {
   linkWithPassword(input: { country: string; email: string; password: string }): Promise<{ userId: string }>;
@@ -12,6 +13,7 @@ export function createAccountLinker(store: AccountStore, fetchImpl: FetchLike = 
       const api = await HelloFreshApi.login({ ...input, fetchImpl });
       const stored = api.toStoredAccount();
       await store.save(stored);
+      log.info("account.linked", { method: "password", country: stored.country, userId: stored.userId });
       return { userId: stored.userId };
     },
     async linkWithToken(input) {
@@ -24,6 +26,7 @@ export function createAccountLinker(store: AccountStore, fetchImpl: FetchLike = 
       });
       const stored = api.toStoredAccount();
       await store.save(stored);
+      log.info("account.linked", { method: "token", country: stored.country, userId: stored.userId });
       return { userId: stored.userId };
     },
   };

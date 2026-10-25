@@ -4,6 +4,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const config_js_1 = require("./config.js");
 const http_js_1 = require("./http.js");
 const hellofresh_session_js_1 = require("./hellofresh-session.js");
+const log_js_1 = require("./log.js");
 const login_mode_js_1 = require("./login-mode.js");
 const mcp_server_js_1 = require("./mcp-server.js");
 function printHttpHelp() {
@@ -19,6 +20,7 @@ HTTP flags and environment:
   MCP_OAUTH_STORE_PATH        Persisted OAuth clients and tokens (mode 0600)
   MCP_USERS_DIR               Directory of per-account HelloFresh tokens
   MCP_OAUTH_REDIRECT_HOSTS    Comma-separated redirect hosts (default: claude.ai, claude.com, chatgpt.com)
+  LOG_LEVEL                   debug | info | warn | error (JSON lines on stderr, default info)
   HELLOFRESH_COUNTRY          Country code for stdio login (default us)
 
 Connect https://<host>/mcp in Claude or ChatGPT. Each person signs in on
@@ -46,12 +48,16 @@ async function main() {
         }
         catch (error) {
             const message = error instanceof config_js_1.ConfigError ? error.message : String(error);
-            console.error(message);
+            log_js_1.log.error("http.config", { err: message });
             process.exitCode = 1;
             return;
         }
         const handle = await (0, http_js_1.startHttpServer)(config);
-        console.error(`HelloFresh MCP server listening on http://${config.host}:${handle.config.port}  MCP ${handle.config.resourceUrl.href}`);
+        log_js_1.log.info("http.listen", {
+            host: config.host,
+            port: handle.config.port,
+            mcp: handle.config.resourceUrl.href,
+        });
         const shutdown = async () => {
             await handle.close();
             process.exit(0);
@@ -65,7 +71,8 @@ async function main() {
     await server.runStdio();
 }
 main().catch((error) => {
-    console.error(error);
+    const message = error instanceof Error ? error.message : String(error);
+    log_js_1.log.error("fatal", { err: message });
     process.exitCode = 1;
 });
 //# sourceMappingURL=index.js.map

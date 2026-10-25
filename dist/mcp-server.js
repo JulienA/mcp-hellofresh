@@ -6,7 +6,9 @@ const stdio_1 = require("@modelcontextprotocol/server/stdio");
 const zod_1 = require("zod");
 const auth_js_1 = require("./auth.js");
 const hellofresh_api_js_1 = require("./hellofresh-api.js");
+const log_js_1 = require("./log.js");
 const login_mode_js_1 = require("./login-mode.js");
+const request_context_js_1 = require("./request-context.js");
 // ─── Schemas ──────────────────────────────────────────────────────────────────
 const GetMenuSchema = zod_1.z.object({
     week_offset: zod_1.z
@@ -369,10 +371,26 @@ class HelloFreshMCPServer {
         }));
         this.server.setRequestHandler("tools/call", async (request) => {
             const { name, arguments: args } = request.params;
+            const started = Date.now();
+            const userId = (0, request_context_js_1.currentHelloFreshUserId)();
             try {
-                return await this.handleTool(name, args ?? {});
+                const result = await this.handleTool(name, args ?? {});
+                log_js_1.log.info("mcp.tool", {
+                    name,
+                    userId,
+                    durationMs: Date.now() - started,
+                    ok: true,
+                });
+                return result;
             }
             catch (error) {
+                log_js_1.log.warn("mcp.tool", {
+                    name,
+                    userId,
+                    durationMs: Date.now() - started,
+                    ok: false,
+                    code: (0, log_js_1.errorCode)(error),
+                });
                 return (0, auth_js_1.formatAuthToolError)(error);
             }
         });
@@ -519,7 +537,7 @@ class HelloFreshMCPServer {
     async runStdio() {
         const transport = new stdio_1.StdioServerTransport();
         await this.server.connect(transport);
-        console.error("HelloFresh MCP server running on stdio");
+        log_js_1.log.info("stdio.listen");
         const shutdown = () => {
             process.exit(0);
         };
