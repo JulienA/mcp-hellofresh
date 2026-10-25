@@ -153,23 +153,24 @@ class HelloFreshApi {
                 throw new HelloFreshApiError("api", `Week ${weekId} was not found on this account.`);
             }
             const recipes = await this.recipesForWeek(subscription, week);
-            // Cart quantity is how many times the recipe is in the box. Portions are the plan size.
-            // `servings` on the input is ignored so a 2-portion plan is not ordered as two copies.
+            // quantity is how many times the recipe is in the box. Portions stay on the plan.
             const selected = [];
-            const seen = new Set();
             for (const meal of meals) {
                 const recipe = recipes.find((item) => item.id === meal.recipeId);
                 if (!recipe || recipe.index === undefined) {
                     throw new HelloFreshApiError("api", `Recipe ${meal.recipeId} is not on the menu for ${weekId}.`);
                 }
-                if (seen.has(recipe.index)) {
+                const quantity = cartQuantity(meal.quantity);
+                const existing = selected.find((item) => item.index === recipe.index);
+                if (existing) {
+                    existing.quantity = Math.min(MAX_CART_QUANTITY, existing.quantity + quantity);
                     continue;
                 }
-                seen.add(recipe.index);
-                selected.push({ index: recipe.index, quantity: 1 });
+                selected.push({ index: recipe.index, quantity });
             }
             const portions = planPortions(subscription);
-            const mealCount = cartMealCount(subscription, selected.length);
+            const totalQuantity = selected.reduce((sum, meal) => sum + meal.quantity, 0);
+            const mealCount = cartMealCount(subscription, totalQuantity);
             const customerId = subscription.customerId;
             const sku = await this.cartProductSku(subscription, mealCount, portions, week.sku);
             const cutoff = formatCutoff(week.cutoffDate);
@@ -190,7 +191,7 @@ class HelloFreshApi {
                 extras: [],
                 meals: selected,
             }, { "x-requested-by": "shopping-experience-web" });
-            return { weekId, portionsPerMeal: portions ?? null, meals: selected, result: body ?? { ok: true } };
+            return { weekId, servingsPerMeal: portions ?? null, meals: selected, result: body ?? { ok: true } };
         });
     }
     async skipWeek(weekId) {
@@ -213,6 +214,7 @@ class HelloFreshApi {
                     status: week.status,
                     subscriptionId: week.subscriptionId,
                     sku: week.sku,
+                    servingsPerMeal: weekPortions(subscription, week.sku) ?? null,
                     meals: await this.selectedMealsForWeek(subscription, week),
                 });
             }
@@ -821,8 +823,8 @@ function selectedMealsFromPayload(payload) {
         if (!record) {
             continue;
         }
-        const servings = selectionServings(record);
-        if (servings <= 0) {
+        const quantity = selectionQuantity(record);
+        if (quantity <= 0) {
             continue;
         }
         const recipe = asRecord(record.recipe) ?? record;
@@ -831,11 +833,11 @@ function selectedMealsFromPayload(payload) {
         if (!recipeId || !recipeName) {
             continue;
         }
-        selected.push({ recipeId, recipeName, servings });
+        selected.push({ recipeId, recipeName, quantity });
     }
     return selected;
 }
-function selectionServings(record) {
+function selectionQuantity(record) {
     const selection = asRecord(record.selection);
     if (!selection) {
         return 0;
@@ -889,6 +891,23 @@ function preferencesFromProfile(payload) {
         vegetarian: taste.vegetarian === true || dietary.some((item) => /vegetarian/i.test(item)),
     };
 }
+const MAX_CART_QUANTITY = 10;
+function cartQuantity(value) {
+    if (value === undefined) {
+        return 1;
+    }
+    if (!Number.isInteger(value) || value < 1 || value > MAX_CART_QUANTITY) {
+        throw new HelloFreshApiError("api", `quantity must be a whole number from 1 to ${MAX_CART_QUANTITY}.`);
+    }
+    return value;
+}
+function weekPortions(subscription, sku) {
+    const fromSku = skuSize(sku).servings;
+    if (fromSku && fromSku > 0) {
+        return fromSku;
+    }
+    return planPortions(subscription);
+}
 function planPortions(subscription) {
     if (subscription.servings && subscription.servings > 0) {
         return subscription.servings;
@@ -896,15 +915,15 @@ function planPortions(subscription) {
     const servings = skuSize(subscription.sku).servings;
     return servings && servings > 0 ? servings : undefined;
 }
-function cartMealCount(subscription, selectedCount) {
-    if (selectedCount >= 2) {
-        return selectedCount;
+function cartMealCount(subscription, totalQuantity) {
+    if (totalQuantity >= 2) {
+        return totalQuantity;
     }
     const planMeals = subscription.meals ?? skuSize(subscription.sku).meals;
     if (planMeals && planMeals >= 2) {
         return planMeals;
     }
-    return selectedCount;
+    return totalQuantity;
 }
 function resizePlanSku(sku, meals, servings) {
     const match = /^(?<prefix>.+-)(?<meals>\d+)-(?<servings>\d+)-(?<tail>\d+)$/.exec(sku);

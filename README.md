@@ -13,7 +13,7 @@ This API is unofficial and can change. A bot-protection block is not a wrong pas
 | `logout` | Delete the saved tokens for this account only. |
 | `get_menu` | Menu for an upcoming week |
 | `get_recipe_details` | Recipe payload from `/gw/recipes` |
-| `select_meals` | Save a meal selection for a week |
+| `select_meals` | Save a meal selection for a week. `quantity` is how many cartons of each recipe. |
 | `skip_week` | Skip a delivery week |
 | `get_delivery_schedule` | Upcoming deliveries |
 | `modify_delivery` | Move one delivery to another date HelloFresh offers |
@@ -166,7 +166,7 @@ claude mcp add hellofresh -- npx -y @striderlabs/mcp-hellofresh
 
 `get_recipe_details`: `recipe_id` required.
 
-`select_meals`: `week_id` required, `meals` required (`recipe_id`). Each recipe is added once. Portions per meal stay on the subscription plan.
+`select_meals`: `week_id` required, `meals` required. Each meal has `recipe_id` and optional `quantity` (1–10, default 1). `quantity` is how many cartons of that recipe go in the box, so `2` orders the same recipe twice. The same recipe listed twice has its quantities added, up to 10. Portions per meal stay on the subscription plan. Use `modify_subscription` to change them.
 
 `skip_week`: `week_id` required.
 

@@ -28,7 +28,8 @@ export interface AccountStatus {
 export interface SelectedMeal {
     recipeId: string;
     recipeName: string;
-    servings: number;
+    /** How many times this recipe is in the box. Not the plan's portions per meal. */
+    quantity: number;
 }
 export interface DeliveryWeek {
     weekId: string;
@@ -37,6 +38,8 @@ export interface DeliveryWeek {
     status?: string;
     subscriptionId?: string;
     sku?: string;
+    /** Portions per meal from the week SKU, or the subscription plan. */
+    servingsPerMeal?: number | null;
     meals: SelectedMeal[];
 }
 export declare class HelloFreshApi {
@@ -73,7 +76,7 @@ export declare class HelloFreshApi {
     getRecipe(recipeId: string): Promise<Record<string, unknown>>;
     selectMeals(weekId: string, meals: Array<{
         recipeId: string;
-        servings?: number;
+        quantity?: number;
     }>): Promise<Record<string, unknown>>;
     skipWeek(weekId: string): Promise<Record<string, unknown>>;
     getDeliveries(): Promise<DeliveryWeek[]>;

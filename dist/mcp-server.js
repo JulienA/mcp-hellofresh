@@ -28,10 +28,17 @@ const SelectMealsSchema = zod_1.z.object({
         .describe("The week identifier (e.g. '2024-W01') for the delivery"),
     meals: zod_1.z
         .array(zod_1.z.object({
-        recipe_id: zod_1.z.string().describe("Recipe ID to select once"),
+        recipe_id: zod_1.z.string().describe("Recipe ID to add to the box"),
+        quantity: zod_1.z
+            .int()
+            .min(1)
+            .max(10)
+            .optional()
+            .default(1)
+            .describe("How many times this recipe is in the box (1-10). 2 means two cartons of the same recipe. Portions per meal stay on the subscription plan."),
     }))
         .min(1)
-        .describe("Recipes to add once each. Portions per meal come from the subscription plan."),
+        .describe("Recipes to put in the box. quantity is the number of cartons of that recipe, not the number of people."),
 });
 const SkipWeekSchema = zod_1.z.object({
     week_id: zod_1.z.string().describe("The week identifier to skip (e.g. '2024-W01')"),
@@ -162,7 +169,7 @@ const TOOLS = [
     },
     {
         name: "select_meals",
-        description: "Choose specific meals for an upcoming delivery week. Each recipe is added once. Portions per meal come from the subscription plan, not from this call. Use modify_subscription to change how many portions every meal includes.",
+        description: "Choose meals for an upcoming delivery week. quantity is how many cartons of that recipe go in the box (default 1; 2 orders the same recipe twice). Portions per meal stay on the subscription plan. Use modify_subscription to change how many people every meal feeds.",
         inputSchema: {
             type: "object",
             properties: {
@@ -172,11 +179,18 @@ const TOOLS = [
                 },
                 meals: {
                     type: "array",
-                    description: "Recipes to add once each. Portions per meal come from the subscription plan.",
+                    description: "Recipes to put in the box. quantity is the number of cartons of that recipe, not the number of people.",
                     items: {
                         type: "object",
                         properties: {
-                            recipe_id: { type: "string", description: "Recipe ID to select once" },
+                            recipe_id: { type: "string", description: "Recipe ID to add to the box" },
+                            quantity: {
+                                type: "integer",
+                                description: "How many times this recipe is in the box (1-10). 2 means two cartons of the same recipe. Portions per meal stay on the subscription plan.",
+                                default: 1,
+                                minimum: 1,
+                                maximum: 10,
+                            },
                         },
                         required: ["recipe_id"],
                     },
@@ -452,7 +466,7 @@ class HelloFreshMCPServer {
             }
             case "select_meals": {
                 const params = SelectMealsSchema.parse(args);
-                const result = await (await this.session.api()).selectMeals(params.week_id, params.meals.map((m) => ({ recipeId: m.recipe_id })));
+                const result = await (await this.session.api()).selectMeals(params.week_id, params.meals.map((m) => ({ recipeId: m.recipe_id, quantity: m.quantity })));
                 return text(result);
             }
             case "skip_week": {
@@ -468,6 +482,7 @@ class HelloFreshMCPServer {
                         weekId: week.weekId,
                         deliveryDate: week.deliveryDate ?? "",
                         status: week.status ?? "",
+                        servingsPerMeal: week.servingsPerMeal ?? null,
                         meals: week.meals,
                         canModify: (week.status ?? "").toUpperCase() !== "PAUSED",
                     })),

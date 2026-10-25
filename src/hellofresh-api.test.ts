@@ -353,26 +353,46 @@ describe("HelloFreshApi requests", () => {
     });
   });
 
-  it("puts each recipe on the cart once and keeps the plan portion size", async () => {
+  it("writes the requested quantity and keeps the plan portion size", async () => {
     const { fetchImpl, calls } = recorded((call) => okAccount(call) ?? Response.json({}, { status: 404 }));
     const api = new HelloFreshApi(stored("access", Math.floor(Date.now() / 1000), 1800), fetchImpl);
-    const explicit = await api.selectMeals(WEEK, [{ recipeId: "recipe-9", servings: 2 }]);
+    const doubled = await api.selectMeals(WEEK, [{ recipeId: "recipe-9", quantity: 2 }]);
     const omitted = await api.selectMeals(WEEK, [{ recipeId: "recipe-9" }]);
     const puts = calls.filter((call) => call.method === "PUT");
     assert.equal(puts.length, 2);
     assert.match(puts[0].url, /\/gw\/v1\/carts\/2099-W01/);
     assert.match(puts[0].url, /customer=cust-1/);
-    assert.match(puts[0].url, /product-sku=FR-CBT-3-2-0/);
+    assert.match(puts[0].url, /product-sku=FR-CBT-2-2-0/);
     assert.match(puts[1].url, /product-sku=FR-CBT-3-2-0/);
-    const explicitBody = JSON.parse(puts[0].body) as { meals: Array<{ index: number; quantity: number }> };
+    const doubledBody = JSON.parse(puts[0].body) as { meals: Array<{ index: number; quantity: number }> };
     const omittedBody = JSON.parse(puts[1].body) as { meals: Array<{ index: number; quantity: number }> };
-    assert.deepEqual(explicitBody.meals, [{ index: 4, quantity: 1 }]);
+    assert.deepEqual(doubledBody.meals, [{ index: 4, quantity: 2 }]);
     assert.deepEqual(omittedBody.meals, [{ index: 4, quantity: 1 }]);
-    assert.equal(explicit.portionsPerMeal, 2);
-    assert.equal(omitted.portionsPerMeal, 2);
+    assert.equal(doubled.servingsPerMeal, 2);
+    assert.equal(omitted.servingsPerMeal, 2);
+    assert.deepEqual(doubled.meals, [{ index: 4, quantity: 2 }]);
   });
 
-  it("does not copy a one-portion week sku or duplicate a repeated recipe", async () => {
+  it("caps a repeated recipe at 10 cartons", async () => {
+    const { fetchImpl, calls } = recorded((call) => okAccount(call) ?? Response.json({}, { status: 404 }));
+    const api = new HelloFreshApi(stored("access", Math.floor(Date.now() / 1000), 1800), fetchImpl);
+    await api.selectMeals(WEEK, [
+      { recipeId: "recipe-9", quantity: 6 },
+      { recipeId: "recipe-9", quantity: 6 },
+    ]);
+    const puts = calls.filter((call) => call.method === "PUT");
+    assert.equal(puts.length, 1);
+    assert.match(puts[0].url, /product-sku=FR-CBT-10-2-0/);
+    assert.deepEqual(JSON.parse(puts[0].body).meals, [{ index: 4, quantity: 10 }]);
+    await assert.rejects(() => api.selectMeals(WEEK, [{ recipeId: "recipe-9", quantity: 11 }]), (error: unknown) => {
+      assert.ok(error instanceof HelloFreshApiError);
+      assert.match(error.message, /quantity must be a whole number from 1 to 10/);
+      return true;
+    });
+    assert.equal(calls.filter((call) => call.method === "PUT").length, 1);
+  });
+
+  it("does not copy a one-portion week sku and merges a repeated recipe", async () => {
     const menu = {
       week: WEEK,
       meals: [
@@ -404,10 +424,10 @@ describe("HelloFreshApi requests", () => {
     });
     const api = new HelloFreshApi(stored("access", Math.floor(Date.now() / 1000), 1800), fetchImpl);
     const four = await api.selectMeals(WEEK, [
-      { recipeId: "recipe-a", servings: 2 },
+      { recipeId: "recipe-a" },
       { recipeId: "recipe-b" },
       { recipeId: "recipe-a" },
-      { recipeId: "recipe-c", servings: 2 },
+      { recipeId: "recipe-c" },
       { recipeId: "recipe-d" },
     ]);
     const two = await api.selectMeals(WEEK, [
@@ -416,11 +436,11 @@ describe("HelloFreshApi requests", () => {
     ]);
     const puts = calls.filter((call) => call.method === "PUT");
     assert.equal(puts.length, 2);
-    assert.match(puts[0].url, /product-sku=FR-CBT-4-2-0/);
+    assert.match(puts[0].url, /product-sku=FR-CBT-5-2-0/);
     assert.equal(puts[0].url.includes("FR-CBT-3-1-0"), false);
     assert.match(puts[1].url, /product-sku=FR-CBT-2-2-0/);
     assert.deepEqual(JSON.parse(puts[0].body).meals, [
-      { index: 1, quantity: 1 },
+      { index: 1, quantity: 2 },
       { index: 2, quantity: 1 },
       { index: 3, quantity: 1 },
       { index: 4, quantity: 1 },
@@ -429,8 +449,8 @@ describe("HelloFreshApi requests", () => {
       { index: 1, quantity: 1 },
       { index: 2, quantity: 1 },
     ]);
-    assert.equal(four.portionsPerMeal, 2);
-    assert.equal(two.portionsPerMeal, 2);
+    assert.equal(four.servingsPerMeal, 2);
+    assert.equal(two.servingsPerMeal, 2);
   });
 
   it("uses a different bearer for each saved account", async () => {
@@ -568,10 +588,11 @@ describe("upcoming deliveries", () => {
       ["2026-W45", "2026-W46", "2026-W47"]
     );
     assert.equal(deliveries.some((week) => week.weekId === "2026-W44"), false);
+    assert.equal(deliveries[0]?.servingsPerMeal, 2);
     assert.deepEqual(deliveries[0]?.meals, [
-      { recipeId: "recipe-a", recipeName: "Poulet", servings: 2 },
-      { recipeId: "recipe-c", recipeName: "Tacos", servings: 1 },
-      { recipeId: "recipe-d", recipeName: "Riz", servings: 3 },
+      { recipeId: "recipe-a", recipeName: "Poulet", quantity: 2 },
+      { recipeId: "recipe-c", recipeName: "Tacos", quantity: 1 },
+      { recipeId: "recipe-d", recipeName: "Riz", quantity: 3 },
     ]);
     assert.deepEqual(deliveries[1]?.meals, []);
     assert.equal(deliveries[2]?.status, "PAUSED");

@@ -80,7 +80,8 @@ interface SubscriptionRecord {
 export interface SelectedMeal {
   recipeId: string;
   recipeName: string;
-  servings: number;
+  /** How many times this recipe is in the box. Not the plan's portions per meal. */
+  quantity: number;
 }
 
 export interface DeliveryWeek {
@@ -90,6 +91,8 @@ export interface DeliveryWeek {
   status?: string;
   subscriptionId?: string;
   sku?: string;
+  /** Portions per meal from the week SKU, or the subscription plan. */
+  servingsPerMeal?: number | null;
   meals: SelectedMeal[];
 }
 
@@ -254,7 +257,7 @@ export class HelloFreshApi {
 
   async selectMeals(
     weekId: string,
-    meals: Array<{ recipeId: string; servings?: number }>
+    meals: Array<{ recipeId: string; quantity?: number }>
   ): Promise<Record<string, unknown>> {
     return this.mutex.runExclusive(async () => {
       const { subscription, weeks } = await this.loadWeeks();
@@ -263,10 +266,8 @@ export class HelloFreshApi {
         throw new HelloFreshApiError("api", `Week ${weekId} was not found on this account.`);
       }
       const recipes = await this.recipesForWeek(subscription, week);
-      // Cart quantity is how many times the recipe is in the box. Portions are the plan size.
-      // `servings` on the input is ignored so a 2-portion plan is not ordered as two copies.
+      // quantity is how many times the recipe is in the box. Portions stay on the plan.
       const selected: Array<{ index: number; quantity: number }> = [];
-      const seen = new Set<number>();
       for (const meal of meals) {
         const recipe = recipes.find((item) => item.id === meal.recipeId);
         if (!recipe || recipe.index === undefined) {
@@ -275,14 +276,17 @@ export class HelloFreshApi {
             `Recipe ${meal.recipeId} is not on the menu for ${weekId}.`
           );
         }
-        if (seen.has(recipe.index)) {
+        const quantity = cartQuantity(meal.quantity);
+        const existing = selected.find((item) => item.index === recipe.index);
+        if (existing) {
+          existing.quantity = Math.min(MAX_CART_QUANTITY, existing.quantity + quantity);
           continue;
         }
-        seen.add(recipe.index);
-        selected.push({ index: recipe.index, quantity: 1 });
+        selected.push({ index: recipe.index, quantity });
       }
       const portions = planPortions(subscription);
-      const mealCount = cartMealCount(subscription, selected.length);
+      const totalQuantity = selected.reduce((sum, meal) => sum + meal.quantity, 0);
+      const mealCount = cartMealCount(subscription, totalQuantity);
       const customerId = subscription.customerId;
       const sku = await this.cartProductSku(subscription, mealCount, portions, week.sku);
       const cutoff = formatCutoff(week.cutoffDate);
@@ -306,7 +310,7 @@ export class HelloFreshApi {
         extras: [],
         meals: selected,
       }, { "x-requested-by": "shopping-experience-web" });
-      return { weekId, portionsPerMeal: portions ?? null, meals: selected, result: body ?? { ok: true } };
+      return { weekId, servingsPerMeal: portions ?? null, meals: selected, result: body ?? { ok: true } };
     });
   }
 
@@ -331,6 +335,7 @@ export class HelloFreshApi {
           status: week.status,
           subscriptionId: week.subscriptionId,
           sku: week.sku,
+          servingsPerMeal: weekPortions(subscription, week.sku) ?? null,
           meals: await this.selectedMealsForWeek(subscription, week),
         });
       }
@@ -1058,8 +1063,8 @@ function selectedMealsFromPayload(payload: unknown): SelectedMeal[] {
     if (!record) {
       continue;
     }
-    const servings = selectionServings(record);
-    if (servings <= 0) {
+    const quantity = selectionQuantity(record);
+    if (quantity <= 0) {
       continue;
     }
     const recipe = asRecord(record.recipe) ?? record;
@@ -1068,12 +1073,12 @@ function selectedMealsFromPayload(payload: unknown): SelectedMeal[] {
     if (!recipeId || !recipeName) {
       continue;
     }
-    selected.push({ recipeId, recipeName, servings });
+    selected.push({ recipeId, recipeName, quantity });
   }
   return selected;
 }
 
-function selectionServings(record: Record<string, unknown>): number {
+function selectionQuantity(record: Record<string, unknown>): number {
   const selection = asRecord(record.selection);
   if (!selection) {
     return 0;
@@ -1130,6 +1135,29 @@ function preferencesFromProfile(payload: unknown): Record<string, unknown> {
   };
 }
 
+const MAX_CART_QUANTITY = 10;
+
+function cartQuantity(value: number | undefined): number {
+  if (value === undefined) {
+    return 1;
+  }
+  if (!Number.isInteger(value) || value < 1 || value > MAX_CART_QUANTITY) {
+    throw new HelloFreshApiError(
+      "api",
+      `quantity must be a whole number from 1 to ${MAX_CART_QUANTITY}.`
+    );
+  }
+  return value;
+}
+
+function weekPortions(subscription: SubscriptionRecord, sku: string | undefined): number | undefined {
+  const fromSku = skuSize(sku).servings;
+  if (fromSku && fromSku > 0) {
+    return fromSku;
+  }
+  return planPortions(subscription);
+}
+
 function planPortions(subscription: SubscriptionRecord): number | undefined {
   if (subscription.servings && subscription.servings > 0) {
     return subscription.servings;
@@ -1138,15 +1166,15 @@ function planPortions(subscription: SubscriptionRecord): number | undefined {
   return servings && servings > 0 ? servings : undefined;
 }
 
-function cartMealCount(subscription: SubscriptionRecord, selectedCount: number): number {
-  if (selectedCount >= 2) {
-    return selectedCount;
+function cartMealCount(subscription: SubscriptionRecord, totalQuantity: number): number {
+  if (totalQuantity >= 2) {
+    return totalQuantity;
   }
   const planMeals = subscription.meals ?? skuSize(subscription.sku).meals;
   if (planMeals && planMeals >= 2) {
     return planMeals;
   }
-  return selectedCount;
+  return totalQuantity;
 }
 
 function resizePlanSku(sku: string, meals: number, servings: number): string | undefined {
