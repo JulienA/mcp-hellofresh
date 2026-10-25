@@ -3,6 +3,7 @@
 import { ConfigError, loadHttpRuntimeConfig } from "./config.js";
 import { startHttpServer } from "./http.js";
 import { createStdioSession } from "./hellofresh-session.js";
+import { log } from "./log.js";
 import { isHttpMode } from "./login-mode.js";
 import { HelloFreshMCPServer } from "./mcp-server.js";
 
@@ -19,6 +20,7 @@ HTTP flags and environment:
   MCP_OAUTH_STORE_PATH        Persisted OAuth clients and tokens (mode 0600)
   MCP_USERS_DIR               Directory of per-account HelloFresh tokens
   MCP_OAUTH_REDIRECT_HOSTS    Comma-separated redirect hosts (default: claude.ai, claude.com, chatgpt.com)
+  LOG_LEVEL                   debug | info | warn | error (JSON lines on stderr, default info)
   HELLOFRESH_COUNTRY          Country code for stdio login (default us)
 
 Connect https://<host>/mcp in Claude or ChatGPT. Each person signs in on
@@ -47,14 +49,16 @@ async function main(): Promise<void> {
       config = loadHttpRuntimeConfig(process.env, argv);
     } catch (error) {
       const message = error instanceof ConfigError ? error.message : String(error);
-      console.error(message);
+      log.error("http.config", { err: message });
       process.exitCode = 1;
       return;
     }
     const handle = await startHttpServer(config);
-    console.error(
-      `HelloFresh MCP server listening on http://${config.host}:${handle.config.port}  MCP ${handle.config.resourceUrl.href}`
-    );
+    log.info("http.listen", {
+      host: config.host,
+      port: handle.config.port,
+      mcp: handle.config.resourceUrl.href,
+    });
 
     const shutdown = async () => {
       await handle.close();
@@ -71,6 +75,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  console.error(error);
+  const message = error instanceof Error ? error.message : String(error);
+  log.error("fatal", { err: message });
   process.exitCode = 1;
 });

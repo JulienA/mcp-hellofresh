@@ -14,6 +14,7 @@ services:
       - "8080:8080"
     environment:
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?Set PUBLIC_BASE_URL to the public HTTPS origin, with no path}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
       - hellofresh-data:/data
     restart: unless-stopped

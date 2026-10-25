@@ -16,6 +16,7 @@ import {
 import type { AccountLinker } from "./account-linker.js";
 import { HELLOFRESH_COUNTRIES } from "./countries.js";
 import { HelloFreshApiError } from "./hellofresh-api.js";
+import { errorCode, log } from "./log.js";
 import { normalizeEmail } from "./accounts.js";
 import { OAuthStore, type StoredOAuthClient } from "./oauth-store.js";
 import {
@@ -279,6 +280,7 @@ export class OwnerAuthorizationServer implements OAuthTokenVerifier {
           this.config.allowLoopbackRedirects
         )
       ) {
+        log.warn("oauth.register", { outcome: "rejected", reason: "redirect_uri" });
         return oauthErrorResponse(
           new OAuthError(
             OAuthErrorCode.InvalidRedirectUri,
@@ -321,6 +323,11 @@ export class OwnerAuthorizationServer implements OAuthTokenVerifier {
       issuedAt,
     };
     await this.store.putClient(client);
+    log.info("oauth.register", {
+      clientId,
+      clientName: client.clientName,
+      redirectHosts: uniqueRedirectHosts(redirectUris),
+    });
 
     return oauthJson(
       {
@@ -375,6 +382,7 @@ export class OwnerAuthorizationServer implements OAuthTokenVerifier {
     }
     const client = await this.store.getClient(clientId);
     if (!client) {
+      log.warn("oauth.authorize", { outcome: "rejected", reason: "unknown_client" });
       return htmlError(400, "Unknown client_id");
     }
     if (!client.redirectUris.includes(redirectUri)) {
@@ -419,6 +427,7 @@ export class OwnerAuthorizationServer implements OAuthTokenVerifier {
       scopes: scope.split(/[+\s]+/).filter(Boolean),
       expiresAt: Date.now() + AUTH_CODE_TTL_SEC * 1000,
     });
+    log.info("oauth.authorize", { outcome: "form", clientId });
     return this.renderAuthorize(id);
   }
 
@@ -491,6 +500,7 @@ export class OwnerAuthorizationServer implements OAuthTokenVerifier {
     const form = await readFormOrJson(request);
     const emailKey = form.email ? `email:${normalizeEmail(form.email)}` : undefined;
     if (this.rateLimiter.tooMany(ip) || (emailKey && this.rateLimiter.tooMany(emailKey))) {
+      log.warn("oauth.authorize", { outcome: "rate_limited" });
       return oauthErrorResponse(
         new OAuthError(OAuthErrorCode.TooManyRequests, "Too many authorize attempts"),
         429
@@ -504,6 +514,7 @@ export class OwnerAuthorizationServer implements OAuthTokenVerifier {
     const pending = this.pending.get(form.request_id ?? "");
     if (!pending || pending.expiresAt < Date.now()) {
       this.pending.delete(form.request_id ?? "");
+      log.warn("oauth.authorize", { outcome: "expired" });
       return htmlError(400, "Authorization request expired. Start again from the client.");
     }
 
@@ -525,12 +536,15 @@ export class OwnerAuthorizationServer implements OAuthTokenVerifier {
         userId = linked.userId;
       }
     } catch (error) {
+      const code = errorCode(error);
       if (error instanceof HelloFreshApiError && error.code === "rate_limited") {
+        log.warn("oauth.authorize", { outcome: "rate_limited", method, country: form.country });
         return oauthErrorResponse(
           new OAuthError(OAuthErrorCode.TooManyRequests, "Too many authorize attempts"),
           429
         );
       }
+      log.warn("oauth.authorize", { outcome: "rejected", method, country: form.country, code });
       const message =
         error instanceof HelloFreshApiError
           ? error.message
@@ -539,6 +553,13 @@ export class OwnerAuthorizationServer implements OAuthTokenVerifier {
     }
 
     this.pending.delete(pending.id);
+    log.info("oauth.authorize", {
+      outcome: "linked",
+      method,
+      country: form.country,
+      userId,
+      clientId: pending.clientId,
+    });
     const code = randomToken(32);
     this.codes.set(sha256Hex(code), {
       clientId: pending.clientId,
@@ -628,6 +649,12 @@ export class OwnerAuthorizationServer implements OAuthTokenVerifier {
       );
     } catch (error) {
       if (error instanceof OAuthError) {
+        log.warn("oauth.token", {
+          grantType: body.grant_type,
+          outcome: "rejected",
+          code: error.code,
+          clientId,
+        });
         return oauthErrorResponse(error);
       }
       throw error;
@@ -678,7 +705,14 @@ export class OwnerAuthorizationServer implements OAuthTokenVerifier {
     if (!resourcesEqual(resource, stored.resource)) {
       throw new OAuthError(OAuthErrorCode.InvalidTarget, "resource does not match the authorization");
     }
-    return this.issueTokens(client.clientId, stored.userId, stored.scopes, stored.resource);
+    const issued = await this.issueTokens(client.clientId, stored.userId, stored.scopes, stored.resource);
+    log.info("oauth.token", {
+      grantType: "authorization_code",
+      outcome: "issued",
+      clientId: client.clientId,
+      userId: stored.userId,
+    });
+    return issued;
   }
 
   private async rotateRefresh(
@@ -706,10 +740,17 @@ export class OwnerAuthorizationServer implements OAuthTokenVerifier {
     if (!resourcesEqual(resource, record.resource)) {
       throw new OAuthError(OAuthErrorCode.InvalidTarget, "resource does not match the refresh token");
     }
-    return this.issueTokens(client.clientId, record.userId, record.scopes, record.resource, {
+    const issued = await this.issueTokens(client.clientId, record.userId, record.scopes, record.resource, {
       replaceAccessHash: record.accessHash,
       replaceRefreshHash: sha256Hex(refreshToken),
     });
+    log.info("oauth.token", {
+      grantType: "refresh_token",
+      outcome: "issued",
+      clientId: client.clientId,
+      userId: record.userId,
+    });
+    return issued;
   }
 
   private async issueTokens(
@@ -757,6 +798,7 @@ export class OwnerAuthorizationServer implements OAuthTokenVerifier {
     if (body.token) {
       await this.store.revokeToken(body.token);
     }
+    log.info("oauth.revoke", { revoked: Boolean(body.token) });
     return new Response(null, { status: 200, headers: { "Access-Control-Allow-Origin": "*" } });
   }
 }
@@ -773,6 +815,21 @@ function normalizeResource(value: string): string {
     href = href.slice(0, -1);
   }
   return href;
+}
+
+function uniqueRedirectHosts(uris: string[]): string[] {
+  const hosts: string[] = [];
+  for (const uri of uris) {
+    try {
+      const host = new URL(uri).hostname.toLowerCase();
+      if (host && !hosts.includes(host)) {
+        hosts.push(host);
+      }
+    } catch {
+      // Skip unparseable redirect URIs; the allowlist already rejected bad ones.
+    }
+  }
+  return hosts;
 }
 
 function htmlError(status: number, message: string): Response {

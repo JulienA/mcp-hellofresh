@@ -3,12 +3,14 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.createAccountLinker = createAccountLinker;
 const accounts_js_1 = require("./accounts.js");
 const hellofresh_api_js_1 = require("./hellofresh-api.js");
+const log_js_1 = require("./log.js");
 function createAccountLinker(store, fetchImpl = fetch) {
     return {
         async linkWithPassword(input) {
             const api = await hellofresh_api_js_1.HelloFreshApi.login({ ...input, fetchImpl });
             const stored = api.toStoredAccount();
             await store.save(stored);
+            log_js_1.log.info("account.linked", { method: "password", country: stored.country, userId: stored.userId });
             return { userId: stored.userId };
         },
         async linkWithToken(input) {
@@ -21,6 +23,7 @@ function createAccountLinker(store, fetchImpl = fetch) {
             });
             const stored = api.toStoredAccount();
             await store.save(stored);
+            log_js_1.log.info("account.linked", { method: "token", country: stored.country, userId: stored.userId });
             return { userId: stored.userId };
         },
     };

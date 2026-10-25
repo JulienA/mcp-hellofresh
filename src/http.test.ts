@@ -8,8 +8,11 @@ import { userIdFor } from "./accounts.js";
 import { ACCESS_TOKEN_TTL_SEC, type HttpRuntimeConfig } from "./config.js";
 import type { FetchLike } from "./hellofresh-api.js";
 import { startHttpServer, type HttpServerHandle } from "./http.js";
+import { captureLogLines, setLogLevel, setLogSink } from "./log.js";
 import { OAuthStore } from "./oauth-store.js";
 import { sha256Hex } from "./security.js";
+
+setLogSink(() => {});
 
 const CORRECT_PASSWORD = "correct-hf-password";
 const CLAUDE_REDIRECT = "https://claude.ai/api/mcp/auth_callback";
@@ -684,5 +687,80 @@ describe("/mcp authentication", () => {
       assert.match(text, /unsupported/);
       assert.match(text, /not available/);
     });
+  });
+});
+
+describe("HTTP JSON logs", () => {
+  it("records authorize, token, and tool calls without secrets", async () => {
+    setLogLevel("debug");
+    const captured = captureLogLines();
+    try {
+      await withServer({}, async (handle) => {
+        const tokens = await completePkce(handle, { email: "alice@example.com" });
+        await toolText(handle, tokens.accessToken, "get_menu", { week_offset: 0 });
+        const health = await fetch(`${handle.baseUrl}/healthz`);
+        assert.equal(health.status, 200);
+      });
+      const blob = captured.lines.join("\n");
+      const records = captured.records();
+      assert.ok(records.some((row) => row.msg === "oauth.register"));
+      assert.ok(records.some((row) => row.msg === "oauth.authorize" && row.outcome === "linked"));
+      assert.ok(
+        records.some(
+          (row) => row.msg === "oauth.token" && row.grantType === "authorization_code" && row.outcome === "issued"
+        )
+      );
+      assert.ok(records.some((row) => row.msg === "mcp.tool" && row.name === "get_menu" && row.ok === true));
+      assert.ok(
+        records.some(
+          (row) =>
+            row.msg === "hellofresh.request" &&
+            typeof row.path === "string" &&
+            row.path.includes("/gw/")
+        )
+      );
+      assert.ok(records.some((row) => row.msg === "http.request" && row.path === "/healthz"));
+      assert.equal(blob.includes("alice@example.com"), false);
+      assert.equal(blob.includes(CORRECT_PASSWORD), false);
+      assert.equal(blob.includes("mcp_"), false);
+      assert.equal(blob.includes("hf-access"), false);
+      assert.equal(blob.includes("Authorization"), false);
+    } finally {
+      captured.restore();
+      setLogLevel(process.env.LOG_LEVEL);
+    }
+  });
+
+  it("does not log a rejected password or email", async () => {
+    setLogLevel("info");
+    const captured = captureLogLines();
+    try {
+      await withServer({}, async (handle) => {
+        const { client_id } = await registerClient(handle.baseUrl);
+        const { challenge } = pkce();
+        const requestId = await authorizeForm(handle, client_id, challenge);
+        const denied = await fetch(`${handle.baseUrl}/authorize`, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            request_id: requestId,
+            auth_method: "password",
+            country: "fr",
+            email: "alice@example.com",
+            password: "wrong-password-value",
+          }),
+        });
+        assert.equal(denied.status, 200);
+      });
+      const blob = captured.lines.join("\n");
+      assert.equal(blob.includes("wrong-password-value"), false);
+      assert.equal(blob.includes("alice@example.com"), false);
+      assert.ok(
+        captured.records().some((row) => row.msg === "oauth.authorize" && row.outcome === "rejected")
+      );
+    } finally {
+      captured.restore();
+      setLogLevel(process.env.LOG_LEVEL);
+    }
   });
 });

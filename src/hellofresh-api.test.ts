@@ -11,6 +11,9 @@ import {
   type FetchLike,
 } from "./hellofresh-api.js";
 import { AccountClients, createStdioSession } from "./hellofresh-session.js";
+import { setLogSink } from "./log.js";
+
+setLogSink(() => {});
 
 const WEEK = "2099-W01";
 

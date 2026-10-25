@@ -9,6 +9,7 @@ import {
   type StoredAccount,
 } from "./accounts.js";
 import { helloFreshCountry, type HelloFreshCountry } from "./countries.js";
+import { log, logPath } from "./log.js";
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -643,19 +644,24 @@ export class HelloFreshApi {
     if (this.accessExpiring(60) && this.account.refreshToken) {
       await this.refresh();
     }
-    const response = await this.fetchImpl(`${this.country.baseUrl}${path}`, {
-      method,
-      headers: {
-        Accept: "application/json, text/plain, */*",
-        Authorization: `Bearer ${this.account.accessToken}`,
-        Origin: this.country.baseUrl,
-        Referer: `${this.country.baseUrl}/my-account`,
-        "User-Agent": USER_AGENT,
-        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-        ...extraHeaders,
+    const response = await loggedFetch(
+      this.fetchImpl,
+      `${this.country.baseUrl}${path}`,
+      {
+        method,
+        headers: {
+          Accept: "application/json, text/plain, */*",
+          Authorization: `Bearer ${this.account.accessToken}`,
+          Origin: this.country.baseUrl,
+          Referer: `${this.country.baseUrl}/my-account`,
+          "User-Agent": USER_AGENT,
+          ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+          ...extraHeaders,
+        },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
       },
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
+      { country: this.country.code, userId: this.account.userId, retried }
+    );
     if (response.status === 401 && !retried && this.account.refreshToken) {
       await this.refresh();
       return this.request(method, path, body, extraHeaders, true);
@@ -671,18 +677,23 @@ export class HelloFreshApi {
       await this.tryRelogin();
       return;
     }
-    const response = await this.fetchImpl(`${this.country.baseUrl}/gw/refresh${this.query()}`, {
-      method: "POST",
-      headers: {
-        Accept: "*/*",
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${this.account.accessToken}`,
-        Origin: this.country.baseUrl,
-        Referer: `${this.country.baseUrl}/login`,
-        "User-Agent": USER_AGENT,
+    const response = await loggedFetch(
+      this.fetchImpl,
+      `${this.country.baseUrl}/gw/refresh${this.query()}`,
+      {
+        method: "POST",
+        headers: {
+          Accept: "*/*",
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${this.account.accessToken}`,
+          Origin: this.country.baseUrl,
+          Referer: `${this.country.baseUrl}/login`,
+          "User-Agent": USER_AGENT,
+        },
+        body: JSON.stringify({ refresh_token: this.account.refreshToken }),
       },
-      body: JSON.stringify({ refresh_token: this.account.refreshToken }),
-    });
+      { country: this.country.code, userId: this.account.userId }
+    );
     let payload: unknown;
     try {
       payload = await readApiResponse(response, RECONNECT_MESSAGE, "reconnect_required");
@@ -748,6 +759,45 @@ export function accountFromAuthPayload(
   };
 }
 
+async function loggedFetch(
+  fetchImpl: FetchLike,
+  url: string,
+  init: RequestInit | undefined,
+  extra: { country?: string; userId?: string; retried?: boolean }
+): Promise<Response> {
+  const started = Date.now();
+  const method = (init?.method ?? "GET").toUpperCase();
+  const path = logPath(url);
+  try {
+    const response = await fetchImpl(url, init);
+    const fields = {
+      method,
+      path,
+      status: response.status,
+      durationMs: Date.now() - started,
+      country: extra.country,
+      userId: extra.userId,
+      retried: extra.retried || undefined,
+    };
+    if (response.status >= 500 || response.status === 429) {
+      log.warn("hellofresh.request", fields);
+    } else {
+      log.info("hellofresh.request", fields);
+    }
+    return response;
+  } catch (error) {
+    log.warn("hellofresh.request", {
+      method,
+      path,
+      durationMs: Date.now() - started,
+      country: extra.country,
+      userId: extra.userId,
+      code: "network",
+    });
+    throw error;
+  }
+}
+
 async function authPost(
   fetchImpl: FetchLike,
   country: HelloFreshCountry,
@@ -757,17 +807,22 @@ async function authPost(
   const params = new URLSearchParams({ country: country.apiCountry, locale: country.locale });
   let response: Response;
   try {
-    response = await fetchImpl(`${country.baseUrl}${path}?${params}`, {
-      method: "POST",
-      headers: {
-        Accept: "application/json, text/plain, */*",
-        "Content-Type": "application/json",
-        Origin: country.baseUrl,
-        Referer: `${country.baseUrl}/login`,
-        "User-Agent": USER_AGENT,
+    response = await loggedFetch(
+      fetchImpl,
+      `${country.baseUrl}${path}?${params}`,
+      {
+        method: "POST",
+        headers: {
+          Accept: "application/json, text/plain, */*",
+          "Content-Type": "application/json",
+          Origin: country.baseUrl,
+          Referer: `${country.baseUrl}/login`,
+          "User-Agent": USER_AGENT,
+        },
+        body: JSON.stringify(body),
       },
-      body: JSON.stringify(body),
-    });
+      { country: country.code }
+    );
   } catch {
     throw new HelloFreshApiError("api", "HelloFresh could not be reached.");
   }

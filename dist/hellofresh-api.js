@@ -5,6 +5,7 @@ exports.accountFromAuthPayload = accountFromAuthPayload;
 const auth_js_1 = require("./auth.js");
 const accounts_js_1 = require("./accounts.js");
 const countries_js_1 = require("./countries.js");
+const log_js_1 = require("./log.js");
 class HelloFreshApiError extends Error {
     code;
     constructor(code, message) {
@@ -470,7 +471,7 @@ class HelloFreshApi {
         if (this.accessExpiring(60) && this.account.refreshToken) {
             await this.refresh();
         }
-        const response = await this.fetchImpl(`${this.country.baseUrl}${path}`, {
+        const response = await loggedFetch(this.fetchImpl, `${this.country.baseUrl}${path}`, {
             method,
             headers: {
                 Accept: "application/json, text/plain, */*",
@@ -482,7 +483,7 @@ class HelloFreshApi {
                 ...extraHeaders,
             },
             body: body !== undefined ? JSON.stringify(body) : undefined,
-        });
+        }, { country: this.country.code, userId: this.account.userId, retried });
         if (response.status === 401 && !retried && this.account.refreshToken) {
             await this.refresh();
             return this.request(method, path, body, extraHeaders, true);
@@ -497,7 +498,7 @@ class HelloFreshApi {
             await this.tryRelogin();
             return;
         }
-        const response = await this.fetchImpl(`${this.country.baseUrl}/gw/refresh${this.query()}`, {
+        const response = await loggedFetch(this.fetchImpl, `${this.country.baseUrl}/gw/refresh${this.query()}`, {
             method: "POST",
             headers: {
                 Accept: "*/*",
@@ -508,7 +509,7 @@ class HelloFreshApi {
                 "User-Agent": USER_AGENT,
             },
             body: JSON.stringify({ refresh_token: this.account.refreshToken }),
-        });
+        }, { country: this.country.code, userId: this.account.userId });
         let payload;
         try {
             payload = await readApiResponse(response, exports.RECONNECT_MESSAGE, "reconnect_required");
@@ -568,11 +569,46 @@ function accountFromAuthPayload(payload, country, email, now) {
         savedAt: new Date(now * 1000).toISOString(),
     };
 }
+async function loggedFetch(fetchImpl, url, init, extra) {
+    const started = Date.now();
+    const method = (init?.method ?? "GET").toUpperCase();
+    const path = (0, log_js_1.logPath)(url);
+    try {
+        const response = await fetchImpl(url, init);
+        const fields = {
+            method,
+            path,
+            status: response.status,
+            durationMs: Date.now() - started,
+            country: extra.country,
+            userId: extra.userId,
+            retried: extra.retried || undefined,
+        };
+        if (response.status >= 500 || response.status === 429) {
+            log_js_1.log.warn("hellofresh.request", fields);
+        }
+        else {
+            log_js_1.log.info("hellofresh.request", fields);
+        }
+        return response;
+    }
+    catch (error) {
+        log_js_1.log.warn("hellofresh.request", {
+            method,
+            path,
+            durationMs: Date.now() - started,
+            country: extra.country,
+            userId: extra.userId,
+            code: "network",
+        });
+        throw error;
+    }
+}
 async function authPost(fetchImpl, country, path, body) {
     const params = new URLSearchParams({ country: country.apiCountry, locale: country.locale });
     let response;
     try {
-        response = await fetchImpl(`${country.baseUrl}${path}?${params}`, {
+        response = await loggedFetch(fetchImpl, `${country.baseUrl}${path}?${params}`, {
             method: "POST",
             headers: {
                 Accept: "application/json, text/plain, */*",
@@ -582,7 +618,7 @@ async function authPost(fetchImpl, country, path, body) {
                 "User-Agent": USER_AGENT,
             },
             body: JSON.stringify(body),
-        });
+        }, { country: country.code });
     }
     catch {
         throw new HelloFreshApiError("api", "HelloFresh could not be reached.");
