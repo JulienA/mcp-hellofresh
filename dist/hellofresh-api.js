@@ -195,15 +195,20 @@ class HelloFreshApi {
     }
     async getDeliveries() {
         return this.mutex.runExclusive(async () => {
-            const { weeks } = await this.loadWeeks();
-            return weeks.map((week) => ({
-                weekId: week.weekId,
-                deliveryDate: week.deliveryDate,
-                cutoffDate: week.cutoffDate,
-                status: week.status,
-                subscriptionId: week.subscriptionId,
-                sku: week.sku,
-            }));
+            const { subscription, weeks } = await this.loadWeeks();
+            const deliveries = [];
+            for (const week of scheduleWeeks(weeks)) {
+                deliveries.push({
+                    weekId: week.weekId,
+                    deliveryDate: week.deliveryDate,
+                    cutoffDate: week.cutoffDate,
+                    status: week.status,
+                    subscriptionId: week.subscriptionId,
+                    sku: week.sku,
+                    meals: await this.selectedMealsForWeek(subscription, week),
+                });
+            }
+            return deliveries;
         });
     }
     async modifyDelivery(weekId, newDate) {
@@ -336,7 +341,7 @@ class HelloFreshApi {
         const subscription = await this.primarySubscription();
         const payload = await this.getJson("/gw/api/customers/me/deliveries", {
             country: this.country.apiCountry,
-            locale: subscription.locale || this.country.locale,
+            locale: this.country.locale,
         });
         const weeks = asList(payload, ["items", "deliveries", "weeks", "data"])
             .map((item) => weekFromRaw(item, subscription.id))
@@ -350,6 +355,24 @@ class HelloFreshApi {
             throw new HelloFreshApiError("reconnect_required", exports.RECONNECT_MESSAGE);
         }
         return subscriptionFromRaw(first);
+    }
+    async selectedMealsForWeek(subscription, week) {
+        const embedded = selectedMealsFromPayload(week.raw);
+        const params = menuParams(subscription, week);
+        if (!params) {
+            return embedded;
+        }
+        try {
+            const payload = await this.getJson("/gw/my-deliveries/menu", params);
+            if (payload && typeof payload === "object" && "week" in payload && payload.week && payload.week !== week.weekId) {
+                return embedded;
+            }
+            const fromMenu = selectedMealsFromPayload(payload);
+            return fromMenu.length > 0 ? fromMenu : embedded;
+        }
+        catch {
+            return embedded;
+        }
     }
     async recipesForWeek(subscription, week) {
         const embedded = recipesFromPayload(week.raw);
@@ -691,11 +714,14 @@ function requireCountry(code) {
     }
     return country;
 }
-function upcomingWeeks(weeks) {
-    const current = isoWeek(new Date());
+const TERMINAL_DELIVERY_STATUSES = new Set(["DELIVERED", "DONATED", "CANCELLED"]);
+function scheduleWeeks(weeks) {
     return [...weeks]
-        .filter((week) => week.weekId >= current && week.status?.toUpperCase() !== "PAUSED")
+        .filter((week) => !TERMINAL_DELIVERY_STATUSES.has(week.status?.toUpperCase() ?? ""))
         .sort((a, b) => a.weekId.localeCompare(b.weekId));
+}
+function upcomingWeeks(weeks) {
+    return scheduleWeeks(weeks).filter((week) => week.status?.toUpperCase() !== "PAUSED");
 }
 function requireWeek(weeks, weekId) {
     const week = weeks.find((item) => item.weekId === weekId);
@@ -703,14 +729,6 @@ function requireWeek(weeks, weekId) {
         throw new HelloFreshApiError("api", `Week ${weekId} was not found on this account.`);
     }
     return week;
-}
-function isoWeek(date) {
-    const utc = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
-    const day = utc.getUTCDay() || 7;
-    utc.setUTCDate(utc.getUTCDate() + 4 - day);
-    const yearStart = new Date(Date.UTC(utc.getUTCFullYear(), 0, 1));
-    const week = Math.ceil(((utc.getTime() - yearStart.getTime()) / 86400000 + 1) / 7);
-    return `${utc.getUTCFullYear()}-W${String(week).padStart(2, "0")}`;
 }
 function menuParams(subscription, week) {
     const sku = week.sku || subscription.sku;
@@ -774,8 +792,42 @@ function weekFromRaw(value, fallbackSubscription) {
         status: stringField(raw, ["status", "state"]),
         subscriptionId: stringField(raw, ["subscriptionId", "subscription_id"]) ?? fallbackSubscription,
         sku: stringField(product ?? {}, ["handle", "sku"]),
+        meals: [],
         raw,
     };
+}
+function selectedMealsFromPayload(payload) {
+    const selected = [];
+    for (const meal of asList(payload, ["meals", "courses", "recipes", "items"])) {
+        const record = asRecord(meal);
+        if (!record) {
+            continue;
+        }
+        const servings = selectionServings(record);
+        if (servings <= 0) {
+            continue;
+        }
+        const recipe = asRecord(record.recipe) ?? record;
+        const recipeId = stringField(recipe, ["id", "recipeId"]);
+        const recipeName = stringField(recipe, ["name", "title"]);
+        if (!recipeId || !recipeName) {
+            continue;
+        }
+        selected.push({ recipeId, recipeName, servings });
+    }
+    return selected;
+}
+function selectionServings(record) {
+    const selection = asRecord(record.selection);
+    if (!selection) {
+        return 0;
+    }
+    const quantity = numberField(selection, ["quantity"]) ?? 0;
+    if (quantity > 0) {
+        return quantity;
+    }
+    const oneOff = numberField(selection, ["oneOffQuantity"]) ?? 0;
+    return oneOff > 0 ? oneOff : 0;
 }
 function recipesFromPayload(payload) {
     const meals = [

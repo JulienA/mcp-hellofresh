@@ -425,6 +425,106 @@ describe("stdio account", () => {
   });
 });
 
+describe("upcoming deliveries", () => {
+  it("keeps the unscoped deliveries URL and returns selected meals for weeks still ahead", async () => {
+    const { fetchImpl, calls } = recorded((call) => {
+      if (call.url.includes("/customers/me/subscriptions")) {
+        const body = subscriptionBody() as { items: Array<Record<string, unknown>> };
+        body.items[0].locale = "en-US";
+        return Response.json(body);
+      }
+      if (call.url.includes("/customers/me/deliveries")) {
+        assert.equal(new URL(call.url).searchParams.has("rangeStart"), false);
+        assert.equal(new URL(call.url).searchParams.has("rangeEnd"), false);
+        assert.equal(new URL(call.url).searchParams.get("country"), "FR");
+        assert.equal(new URL(call.url).searchParams.get("locale"), "fr-FR");
+        return Response.json({
+          items: [
+            {
+              id: "2026-W44",
+              deliveryDate: "2026-10-24T12:00:00+0200",
+              cutoffDate: "2026-10-20T23:59:59+0200",
+              status: "DELIVERED",
+              subscriptionId: 812405,
+              product: { handle: "FR-CBU-3-2-0" },
+            },
+            {
+              id: "2026-W45",
+              deliveryDate: "2026-10-31T12:00:00+0100",
+              cutoffDate: "2026-10-27T23:59:59+0100",
+              status: "RUNNING",
+              subscriptionId: 812405,
+              product: { handle: "FR-CBU-6-2-0" },
+            },
+            {
+              id: "2026-W46",
+              deliveryDate: "2026-11-07T12:00:00+0100",
+              cutoffDate: "2026-11-03T23:59:59+0100",
+              status: "RUNNING",
+              subscriptionId: 812405,
+              product: { handle: "FR-CBU-6-2-0" },
+            },
+            {
+              id: "2026-W47",
+              deliveryDate: "2026-11-14T12:00:00+0100",
+              cutoffDate: "2026-11-10T23:59:59+0100",
+              status: "PAUSED",
+              subscriptionId: 812405,
+              product: { handle: "FR-CBU-3-2-0" },
+            },
+          ],
+        });
+      }
+      if (call.url.includes("/my-deliveries/menu")) {
+        const params = new URL(call.url).searchParams;
+        const week = params.get("week");
+        if (week === "2026-W45") {
+          assert.equal(params.get("product-sku"), "FR-CBU-6-2-0");
+          return Response.json({
+            week: "2026-W45",
+            meals: [
+              { index: 1, selection: { quantity: 2 }, recipe: { id: "recipe-a", name: "Poulet" } },
+              { index: 2, selection: { quantity: 0 }, recipe: { id: "recipe-b", name: "Soupe" } },
+              { index: 3, selection: { quantity: 1 }, recipe: { id: "recipe-c", name: "Tacos" } },
+              { index: 4, selection: { quantity: 0, oneOffQuantity: 3 }, recipe: { id: "recipe-d", name: "Riz" } },
+            ],
+          });
+        }
+        if (week === "2026-W46") {
+          return Response.json({ message: "menu down" }, { status: 500 });
+        }
+        return Response.json({ week, meals: [] });
+      }
+      return okAccount(call) ?? Response.json({}, { status: 404 });
+    });
+    const api = new HelloFreshApi(stored("access", Math.floor(Date.now() / 1000), 1800), fetchImpl);
+    const deliveries = await api.getDeliveries();
+    assert.deepEqual(
+      deliveries.map((week) => week.weekId),
+      ["2026-W45", "2026-W46", "2026-W47"]
+    );
+    assert.equal(deliveries.some((week) => week.weekId === "2026-W44"), false);
+    assert.deepEqual(deliveries[0]?.meals, [
+      { recipeId: "recipe-a", recipeName: "Poulet", servings: 2 },
+      { recipeId: "recipe-c", recipeName: "Tacos", servings: 1 },
+      { recipeId: "recipe-d", recipeName: "Riz", servings: 3 },
+    ]);
+    assert.deepEqual(deliveries[1]?.meals, []);
+    assert.equal(deliveries[2]?.status, "PAUSED");
+    const subscription = await api.getSubscription();
+    assert.equal(subscription.nextDeliveryDate, "2026-10-31T12:00:00+0100");
+    const menu = await api.getMenu(0);
+    assert.equal(menu.weekId, "2026-W45");
+    assert.deepEqual(
+      menu.recipes.map((recipe) => recipe.name),
+      ["Poulet", "Soupe", "Tacos", "Riz"]
+    );
+    const deliveryCalls = calls.filter((call) => call.url.includes("/customers/me/deliveries"));
+    assert.ok(deliveryCalls.length >= 1);
+    assert.equal(deliveryCalls.every((call) => !call.url.includes("rangeStart")), true);
+  });
+});
+
 function stored(accessToken: string, issuedAt: number, expiresIn: number): StoredAccount {
   return {
     userId: userIdFor("fr", "ada@example.com"),
