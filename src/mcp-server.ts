@@ -11,7 +11,13 @@ import {
 import type { HelloFreshSession } from "./hellofresh-session.js";
 import { errorCode, log } from "./log.js";
 import { assertInteractiveLoginAllowed, HTTP_LOGIN_MESSAGE } from "./login-mode.js";
-import { MENU_UI_URI, RECIPE_UI_URI, listRecipeUiResources, readRecipeUiResource } from "./recipe-ui.js";
+import {
+  MENU_UI_URI,
+  RECIPE_UI_URI,
+  listRecipeUiResources,
+  menuWeekLabel,
+  readRecipeUiResource,
+} from "./recipe-ui.js";
 import { currentHelloFreshUserId } from "./request-context.js";
 
 export interface HelloFreshMCPServerOptions {
@@ -570,6 +576,7 @@ export class HelloFreshMCPServer {
           content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
           structuredContent: {
             week_id: menu.weekId,
+            week_label: menuWeekLabel(menu.weekId),
             recipes: menu.recipes.map(menuCard),
           },
         };

@@ -23,15 +23,15 @@ const DOCUMENTS: RecipeUiDocument[] = [
     name: "HelloFresh menu",
     description: "Recipe cards for one HelloFresh menu week.",
     appName: "HelloFresh menu",
-    height: "640",
+    height: "720",
     mode: "menu",
   }),
   documentFor({
     uri: RECIPE_UI_URI,
     name: "HelloFresh recipe",
-    description: "One HelloFresh recipe card, with ingredients and steps.",
+    description: "One HelloFresh recipe card, with photo, tags, and prep time.",
     appName: "HelloFresh recipe",
-    height: "840",
+    height: "480",
     mode: "recipe",
   }),
 ];
@@ -42,6 +42,44 @@ export function listRecipeUiResources(): Array<Omit<RecipeUiDocument, "text">> {
 
 export function readRecipeUiResource(uri: string): RecipeUiDocument | undefined {
   return DOCUMENTS.find((document) => document.uri === uri);
+}
+
+/** ISO week `YYYY-Www` as a French Monday–Sunday range, e.g. "9 – 15 novembre 2026". */
+export function menuWeekLabel(weekId: string): string {
+  const match = /^(\d{4})-W(\d{2})$/.exec(weekId);
+  if (!match) {
+    return weekId;
+  }
+  const year = Number(match[1]);
+  const week = Number(match[2]);
+  if (week < 1 || week > 53) {
+    return weekId;
+  }
+  const jan4 = new Date(Date.UTC(year, 0, 4));
+  const monday = new Date(jan4);
+  monday.setUTCDate(jan4.getUTCDate() - ((jan4.getUTCDay() + 6) % 7) + (week - 1) * 7);
+  const thursday = new Date(monday);
+  thursday.setUTCDate(monday.getUTCDate() + 3);
+  if (thursday.getUTCFullYear() !== year) {
+    return weekId;
+  }
+  const sunday = new Date(monday);
+  sunday.setUTCDate(monday.getUTCDate() + 6);
+  const sameYear = monday.getUTCFullYear() === sunday.getUTCFullYear();
+  const sameMonth = sameYear && monday.getUTCMonth() === sunday.getUTCMonth();
+  const start = new Intl.DateTimeFormat("fr-FR", {
+    day: "numeric",
+    ...(sameMonth ? {} : { month: "long" as const }),
+    ...(sameYear ? {} : { year: "numeric" as const }),
+    timeZone: "UTC",
+  }).format(monday);
+  const end = new Intl.DateTimeFormat("fr-FR", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(sunday);
+  return `${start} – ${end}`;
 }
 
 function documentFor(options: {
@@ -101,19 +139,26 @@ function page(appName: string, mode: "menu" | "recipe"): string {
 <style>
   body { margin: 0; padding: 12px; font: 14px/1.4 system-ui, sans-serif; color: CanvasText; background: transparent; }
   .week { margin: 0 0 12px; font-weight: 650; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }
+  .toolbar input, .toolbar select, .pager button, .validate {
+    font: inherit; color: CanvasText; background: Canvas;
+    border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); border-radius: 8px;
+  }
+  .toolbar input, .toolbar select { padding: 6px 8px; }
+  .toolbar input { min-width: 140px; flex: 1; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
   .card { border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); border-radius: 12px; overflow: hidden; background: Canvas; }
   .card img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: cover; background: color-mix(in srgb, CanvasText 8%, Canvas); }
   .body { display: grid; gap: 6px; padding: 10px 12px 12px; }
   .name { margin: 0; font-size: 16px; }
-  .desc, .allergens { margin: 0; }
-  .desc, .allergens { color: color-mix(in srgb, CanvasText 78%, Canvas); }
+  .desc, .allergens { margin: 0; color: color-mix(in srgb, CanvasText 78%, Canvas); }
   .badges, .meta { display: flex; flex-wrap: wrap; gap: 6px; }
   .badges span, .meta span { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: color-mix(in srgb, CanvasText 8%, Canvas); }
-  .allergens, .section h3 { font-size: 12px; }
-  .section { margin-top: 8px; }
-  .section h3 { margin: 0 0 4px; }
-  ol, ul { margin: 0; padding-left: 18px; }
+  .allergens { font-size: 12px; }
+  .validate { justify-self: start; padding: 6px 10px; cursor: pointer; background: color-mix(in srgb, CanvasText 8%, Canvas); }
+  .pager { display: flex; align-items: center; gap: 8px; margin: 12px 0 0; }
+  .pager button { padding: 6px 10px; cursor: pointer; background: color-mix(in srgb, CanvasText 8%, Canvas); }
+  .pager button:disabled, .validate:disabled { opacity: 0.5; cursor: default; }
   .single { max-width: 640px; }
 </style>
 </head>
@@ -122,7 +167,17 @@ function page(appName: string, mode: "menu" | "recipe"): string {
 <script type="module">
 import { App } from ${JSON.stringify(APP_SCRIPT)};
 const CDN = ${JSON.stringify(`${IMAGE_ORIGIN}/`)};
+const PAGE_SIZE = 6;
 const root = document.getElementById("root");
+const app = new App({ name: ${JSON.stringify(appName)}, version: "1.0.0" });
+let menuWeek = "";
+let menuRecipes = [];
+let menuQuery = "";
+let menuTag = "";
+let menuMaxTime = 0;
+let menuPage = 1;
+let resultsEl = null;
+let pagerEl = null;
 
 function text(el, value) {
   el.textContent = value == null ? "" : String(value);
@@ -142,30 +197,69 @@ function allergenLine(recipe) {
   return parts.join(" · ");
 }
 
-function listSection(title, items, ordered) {
-  const section = document.createElement("section");
-  section.className = "section";
-  const heading = document.createElement("h3");
-  text(heading, title);
-  section.append(heading);
-  const list = document.createElement(ordered ? "ol" : "ul");
-  const values = Array.isArray(items) ? items : [];
-  if (values.length === 0) {
-    const item = document.createElement("li");
-    text(item, "—");
-    list.append(item);
-  } else {
-    for (const value of values) {
-      const item = document.createElement("li");
-      text(item, value);
-      list.append(item);
+function uniqueTags(recipes) {
+  const seen = [];
+  for (const recipe of recipes) {
+    const tags = recipe && Array.isArray(recipe.tags) ? recipe.tags : [];
+    for (const tag of tags) {
+      if (typeof tag !== "string" || !tag) continue;
+      if (seen.some((item) => item.toLocaleLowerCase() === tag.toLocaleLowerCase())) continue;
+      seen.push(tag);
     }
   }
-  section.append(list);
-  return section;
+  seen.sort((a, b) => a.localeCompare(b, "fr"));
+  return seen;
 }
 
-function fillCard(recipe, withDetails) {
+function filteredRecipes(recipes, query, tag, maxTime) {
+  const q = query.trim().toLocaleLowerCase();
+  return recipes.filter((recipe) => {
+    const name = String(recipe && recipe.name || "").toLocaleLowerCase();
+    if (q && name.indexOf(q) < 0) return false;
+    if (tag) {
+      const tags = recipe && Array.isArray(recipe.tags) ? recipe.tags : [];
+      const key = tag.toLocaleLowerCase();
+      if (!tags.some((item) => String(item).toLocaleLowerCase() === key)) return false;
+    }
+    if (maxTime && !(recipe && typeof recipe.prepTime === "number" && recipe.prepTime <= maxTime)) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function validateButton(recipe) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "validate";
+  text(button, "Valider");
+  button.addEventListener("click", async () => {
+    const name = recipe && recipe.name ? String(recipe.name) : "";
+    const id = recipe && recipe.id ? String(recipe.id) : "";
+    button.disabled = true;
+    try {
+      const result = await app.sendMessage({
+        role: "user",
+        content: [{
+          type: "text",
+          text: "Valide la recette « " + name + " » (id: " + id + ") pour la semaine " + menuWeek + ".",
+        }],
+      });
+      if (result && result.isError) {
+        button.disabled = false;
+        text(button, "Erreur");
+        return;
+      }
+      text(button, "Envoyé");
+    } catch {
+      button.disabled = false;
+      text(button, "Erreur");
+    }
+  });
+  return button;
+}
+
+function fillCard(recipe, forMenu) {
   const card = document.createElement("article");
   card.className = "card";
   const src = cdnSrc(recipe && recipe.imageUrl);
@@ -181,7 +275,7 @@ function fillCard(recipe, withDetails) {
   name.className = "name";
   text(name, recipe && recipe.name);
   body.append(name);
-  if (recipe && recipe.description) {
+  if (forMenu && recipe && recipe.description) {
     const desc = document.createElement("p");
     desc.className = "desc";
     text(desc, recipe.description);
@@ -205,57 +299,151 @@ function fillCard(recipe, withDetails) {
     text(item, recipe.prepTime + " min");
     meta.append(item);
   }
-  if (recipe && typeof recipe.calories === "number") {
+  if (forMenu && recipe && typeof recipe.calories === "number") {
     const item = document.createElement("span");
     text(item, recipe.calories + " kcal");
     meta.append(item);
   }
   if (meta.childNodes.length) body.append(meta);
-  const allergens = allergenLine(recipe);
-  if (allergens) {
-    const line = document.createElement("p");
-    line.className = "allergens";
-    text(line, allergens);
-    body.append(line);
-  }
-  if (withDetails) {
-    body.append(listSection("Ingrédients", recipe && recipe.ingredients, false));
-    body.append(listSection("Étapes", recipe && recipe.steps, true));
+  if (forMenu) {
+    const allergens = allergenLine(recipe);
+    if (allergens) {
+      const line = document.createElement("p");
+      line.className = "allergens";
+      text(line, allergens);
+      body.append(line);
+    }
+    body.append(validateButton(recipe));
   }
   card.append(body);
   return card;
 }
 
+function option(select, value, label) {
+  const item = document.createElement("option");
+  item.value = value;
+  text(item, label);
+  select.append(item);
+}
+
+function toolbar() {
+  const bar = document.createElement("div");
+  bar.className = "toolbar";
+  const search = document.createElement("input");
+  search.type = "search";
+  search.placeholder = "Rechercher";
+  search.addEventListener("input", () => {
+    menuQuery = search.value;
+    menuPage = 1;
+    drawResults();
+  });
+  const tagSelect = document.createElement("select");
+  option(tagSelect, "", "Tous");
+  for (const tag of uniqueTags(menuRecipes)) option(tagSelect, tag, tag);
+  tagSelect.addEventListener("change", () => {
+    menuTag = tagSelect.value;
+    menuPage = 1;
+    drawResults();
+  });
+  const timeSelect = document.createElement("select");
+  option(timeSelect, "0", "Tous");
+  option(timeSelect, "20", "≤ 20 min");
+  option(timeSelect, "30", "≤ 30 min");
+  option(timeSelect, "45", "≤ 45 min");
+  timeSelect.addEventListener("change", () => {
+    menuMaxTime = Number(timeSelect.value) || 0;
+    menuPage = 1;
+    drawResults();
+  });
+  bar.append(search, tagSelect, timeSelect);
+  return bar;
+}
+
+function drawPager(pages) {
+  pagerEl.replaceChildren();
+  const prev = document.createElement("button");
+  prev.type = "button";
+  text(prev, "Précédent");
+  prev.disabled = menuPage <= 1;
+  prev.addEventListener("click", () => {
+    menuPage -= 1;
+    drawResults();
+  });
+  const label = document.createElement("span");
+  text(label, menuPage + " / " + pages);
+  const next = document.createElement("button");
+  next.type = "button";
+  text(next, "Suivant");
+  next.disabled = menuPage >= pages;
+  next.addEventListener("click", () => {
+    menuPage += 1;
+    drawResults();
+  });
+  pagerEl.append(prev, label, next);
+}
+
+function drawResults() {
+  const matched = filteredRecipes(menuRecipes, menuQuery, menuTag, menuMaxTime);
+  const pages = Math.max(1, Math.ceil(matched.length / PAGE_SIZE));
+  if (menuPage > pages) menuPage = pages;
+  resultsEl.replaceChildren();
+  if (matched.length === 0) {
+    const empty = document.createElement("p");
+    text(empty, "Aucune recette.");
+    resultsEl.append(empty);
+    pagerEl.replaceChildren();
+    return;
+  }
+  const grid = document.createElement("div");
+  grid.className = "grid";
+  const start = (menuPage - 1) * PAGE_SIZE;
+  for (const recipe of matched.slice(start, start + PAGE_SIZE)) {
+    grid.append(fillCard(recipe, true));
+  }
+  resultsEl.append(grid);
+  drawPager(pages);
+}
+
+function weekHeading(data) {
+  if (data && typeof data.week_label === "string" && data.week_label.trim()) return data.week_label.trim();
+  return data && typeof data.week_id === "string" ? data.week_id : "";
+}
+
 function renderMenu(data) {
+  menuWeek = data && typeof data.week_id === "string" ? data.week_id : "";
+  menuRecipes = data && Array.isArray(data.recipes) ? data.recipes : [];
+  menuQuery = "";
+  menuTag = "";
+  menuMaxTime = 0;
+  menuPage = 1;
   root.replaceChildren();
-  const week = data && typeof data.week_id === "string" ? data.week_id : "";
-  if (week) {
+  const headingText = weekHeading(data);
+  if (headingText) {
     const heading = document.createElement("p");
     heading.className = "week";
-    text(heading, week);
+    text(heading, headingText);
     root.append(heading);
   }
-  const recipes = data && Array.isArray(data.recipes) ? data.recipes : [];
-  if (recipes.length === 0) {
+  if (menuRecipes.length === 0) {
     const empty = document.createElement("p");
     text(empty, "Aucune recette.");
     root.append(empty);
     return;
   }
-  const grid = document.createElement("div");
-  grid.className = "grid";
-  for (const recipe of recipes) grid.append(fillCard(recipe, false));
-  root.append(grid);
+  resultsEl = document.createElement("div");
+  pagerEl = document.createElement("div");
+  pagerEl.className = "pager";
+  root.append(toolbar(), resultsEl, pagerEl);
+  drawResults();
 }
 
 function renderRecipe(data) {
   root.replaceChildren();
-  const card = fillCard(data && typeof data === "object" ? data : {}, true);
+  const card = fillCard(data && typeof data === "object" ? data : {}, false);
   card.classList.add("single");
   root.append(card);
 }
 
-const app = new App({ name: ${JSON.stringify(appName)}, version: "1.0.0" });
 app.ontoolresult = (result) => {
   const data = result && result.structuredContent && typeof result.structuredContent === "object"
     ? result.structuredContent

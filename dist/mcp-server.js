@@ -510,6 +510,7 @@ class HelloFreshMCPServer {
                     content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
                     structuredContent: {
                         week_id: menu.weekId,
+                        week_label: (0, recipe_ui_js_1.menuWeekLabel)(menu.weekId),
                         recipes: menu.recipes.map(menuCard),
                     },
                 };

@@ -170,7 +170,7 @@ claude mcp add hellofresh -- npx -y @striderlabs/mcp-hellofresh
 
 `get_menu`: `week_offset` optional, 0–4. Each recipe includes `prepTime` (minutes, or `null`), `label` (card badge), `tags`, `calories` (kcal per portion, or `null`), `allergens`, and `allergenTraces`. `get_recipe_details` is for ingredients, steps, and the full nutrition table. The text result stays that JSON. Hosts that render MCP Apps also read `structuredContent` into recipe cards (`ui://hellofresh/menu`). Photos are public `img.hellofresh.com` URLs, not downloaded bytes.
 
-`get_recipe_details`: `recipe_id` required. The text result is the HelloFresh payload. The card (`ui://hellofresh/recipe`) shows the name, photo, time, calories, allergens, ingredients, and steps.
+`get_recipe_details`: `recipe_id` required. The text result is the HelloFresh payload. The card (`ui://hellofresh/recipe`) shows the name, photo, tags, and prep time.
 
 `get_recipe_image`: `recipe_id` required. Returns the photo and its public `img.hellofresh.com` URL. A CloudFront `imageLink` is not fetched; the tool uses `imagePath`, or the `/image/...` part of that link.
 

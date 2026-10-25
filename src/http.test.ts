@@ -788,23 +788,39 @@ describe("/mcp authentication", () => {
         text?: string;
         _meta?: { ui?: { csp?: { resourceDomains?: string[] } } };
       }>;
+      const menuHtml = contents[0]?.text ?? "";
       assert.equal(contents[0]?.mimeType, "text/html;profile=mcp-app");
-      assert.match(contents[0]?.text ?? "", /ontoolresult/);
+      assert.match(menuHtml, /ontoolresult/);
       assert.match(
-        contents[0]?.text ?? "",
+        menuHtml,
         /https:\/\/unpkg.com\/@modelcontextprotocol\/ext-apps@1\.7\.5\/dist\/src\/app-with-deps\.js/
       );
+      assert.match(menuHtml, /sendMessage/);
+      assert.match(menuHtml, /isError/);
+      assert.match(menuHtml, /Rechercher/);
+      assert.match(menuHtml, /PAGE_SIZE = 6/);
+      assert.match(menuHtml, /Précédent/);
+      assert.match(menuHtml, /Valider/);
+      assert.match(menuHtml, /week_label/);
       assert.deepEqual(contents[0]?._meta?.ui?.csp?.resourceDomains, [
         "https://img.hellofresh.com",
         "https://unpkg.com",
       ]);
 
+      const recipeRead = await rpc("resources/read", { uri: "ui://hellofresh/recipe" });
+      const recipeContents = recipeRead.result?.contents as Array<{ text?: string }>;
+      const recipeHtml = recipeContents[0]?.text ?? "";
+      assert.doesNotMatch(recipeHtml, /Ingrédients/);
+      assert.doesNotMatch(recipeHtml, /Étapes/);
+
       const menu = await rpc("tools/call", { name: "get_menu", arguments: { week_offset: 0 } });
       const structured = menu.result?.structuredContent as {
         week_id: string;
+        week_label: string;
         recipes: Array<{ name: string; imageUrl?: string; description: string }>;
       };
       assert.equal(structured.week_id, WEEK);
+      assert.equal(structured.week_label, "29 décembre 2098 – 4 janvier 2099");
       assert.equal(structured.recipes[0]?.name, "Tacos");
       assert.equal(structured.recipes[0]?.description, "Crispy");
       assert.equal(
