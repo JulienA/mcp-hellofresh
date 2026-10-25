@@ -82,6 +82,27 @@ export function menuWeekLabel(weekId: string): string {
   return `${start} – ${end}`;
 }
 
+/** Calendar date from a HelloFresh timestamp, e.g. "31 octobre 2026". */
+export function deliveryDateLabel(deliveryDate: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(deliveryDate);
+  if (!match) {
+    return "";
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+    return "";
+  }
+  return new Intl.DateTimeFormat("fr-FR", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(date);
+}
+
 function documentFor(options: {
   uri: typeof MENU_UI_URI | typeof RECIPE_UI_URI;
   name: string;
@@ -139,6 +160,8 @@ function page(appName: string, mode: "menu" | "recipe"): string {
 <style>
   body { margin: 0; padding: 12px; font: 14px/1.4 system-ui, sans-serif; color: CanvasText; background: transparent; }
   .week { margin: 0 0 12px; font-weight: 650; }
+  .week:has(+ .delivery) { margin-bottom: 2px; }
+  .delivery { margin: 0 0 12px; color: color-mix(in srgb, CanvasText 78%, Canvas); }
   .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }
   .toolbar input, .toolbar select, .pager button, .validate {
     font: inherit; color: CanvasText; background: Canvas;
@@ -404,9 +427,63 @@ function drawResults() {
   drawPager(pages);
 }
 
+function isoWeekLabel(weekId) {
+  const match = /^(\\d{4})-W(\\d{2})$/.exec(String(weekId || ""));
+  if (!match) return weekId || "";
+  const year = Number(match[1]);
+  const week = Number(match[2]);
+  if (week < 1 || week > 53) return weekId;
+  const jan4 = new Date(Date.UTC(year, 0, 4));
+  const monday = new Date(jan4);
+  monday.setUTCDate(jan4.getUTCDate() - ((jan4.getUTCDay() + 6) % 7) + (week - 1) * 7);
+  const thursday = new Date(monday);
+  thursday.setUTCDate(monday.getUTCDate() + 3);
+  if (thursday.getUTCFullYear() !== year) return weekId;
+  const sunday = new Date(monday);
+  sunday.setUTCDate(monday.getUTCDate() + 6);
+  const sameYear = monday.getUTCFullYear() === sunday.getUTCFullYear();
+  const sameMonth = sameYear && monday.getUTCMonth() === sunday.getUTCMonth();
+  const startOptions = { day: "numeric", timeZone: "UTC" };
+  if (!sameMonth) startOptions.month = "long";
+  if (!sameYear) startOptions.year = "numeric";
+  const start = new Intl.DateTimeFormat("fr-FR", startOptions).format(monday);
+  const end = new Intl.DateTimeFormat("fr-FR", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(sunday);
+  return start + " – " + end;
+}
+
+function deliveryDateLabel(value) {
+  const match = /^(\\d{4})-(\\d{2})-(\\d{2})/.exec(String(value || ""));
+  if (!match) return "";
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return "";
+  return new Intl.DateTimeFormat("fr-FR", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(date);
+}
+
 function weekHeading(data) {
-  if (data && typeof data.week_label === "string" && data.week_label.trim()) return data.week_label.trim();
-  return data && typeof data.week_id === "string" ? data.week_id : "";
+  const weekId = data && typeof data.week_id === "string" ? data.week_id : "";
+  const fromId = isoWeekLabel(weekId);
+  if (fromId) return fromId;
+  const labeled = data && typeof data.week_label === "string" ? data.week_label.trim() : "";
+  return labeled || weekId;
+}
+
+function deliveryHeading(data) {
+  const labeled = data && typeof data.delivery_label === "string" ? data.delivery_label.trim() : "";
+  if (labeled) return labeled;
+  return deliveryDateLabel(data && typeof data.delivery_date === "string" ? data.delivery_date : "");
 }
 
 function renderMenu(data) {
@@ -423,6 +500,13 @@ function renderMenu(data) {
     heading.className = "week";
     text(heading, headingText);
     root.append(heading);
+  }
+  const deliveryText = deliveryHeading(data);
+  if (deliveryText) {
+    const delivery = document.createElement("p");
+    delivery.className = "delivery";
+    text(delivery, "Livraison le " + deliveryText);
+    root.append(delivery);
   }
   if (menuRecipes.length === 0) {
     const empty = document.createElement("p");

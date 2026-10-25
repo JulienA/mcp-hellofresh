@@ -306,7 +306,7 @@ export class HelloFreshApi {
     };
   }
 
-  async getMenu(weekOffset = 0): Promise<{ weekId: string; recipes: RecipeSummary[] }> {
+  async getMenu(weekOffset = 0): Promise<{ weekId: string; deliveryDate?: string; recipes: RecipeSummary[] }> {
     return this.mutex.runExclusive(async () => {
       const { subscription, weeks } = await this.loadWeeks();
       const upcoming = upcomingWeeks(weeks);
@@ -315,7 +315,7 @@ export class HelloFreshApi {
         throw new HelloFreshApiError("api", `No HelloFresh menu week at offset ${weekOffset}.`);
       }
       const recipes = await this.recipesForWeek(subscription, week, true);
-      return { weekId: week.weekId, recipes };
+      return { weekId: week.weekId, deliveryDate: week.deliveryDate, recipes };
     });
   }
 

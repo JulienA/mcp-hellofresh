@@ -107,6 +107,7 @@ export declare class HelloFreshApi {
     status(): AccountStatus;
     getMenu(weekOffset?: number): Promise<{
         weekId: string;
+        deliveryDate?: string;
         recipes: RecipeSummary[];
     }>;
     getRecipe(recipeId: string): Promise<Record<string, unknown>>;

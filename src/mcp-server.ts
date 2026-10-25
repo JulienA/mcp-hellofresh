@@ -15,6 +15,7 @@ import {
   MENU_UI_URI,
   RECIPE_UI_URI,
   listRecipeUiResources,
+  deliveryDateLabel,
   menuWeekLabel,
   readRecipeUiResource,
 } from "./recipe-ui.js";
@@ -566,9 +567,14 @@ export class HelloFreshMCPServer {
       case "get_menu": {
         const params = GetMenuSchema.parse(args);
         const menu = await (await this.session.api()).getMenu(params.week_offset);
+        const weekLabel = menuWeekLabel(menu.weekId);
+        const deliveryLabel = menu.deliveryDate ? deliveryDateLabel(menu.deliveryDate) : "";
         const payload = {
           week_offset: params.week_offset,
           week_id: menu.weekId,
+          week_label: weekLabel,
+          ...(menu.deliveryDate ? { delivery_date: menu.deliveryDate } : {}),
+          ...(deliveryLabel ? { delivery_label: deliveryLabel } : {}),
           recipe_count: menu.recipes.length,
           recipes: menu.recipes,
         };
@@ -576,7 +582,9 @@ export class HelloFreshMCPServer {
           content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
           structuredContent: {
             week_id: menu.weekId,
-            week_label: menuWeekLabel(menu.weekId),
+            week_label: weekLabel,
+            ...(menu.deliveryDate ? { delivery_date: menu.deliveryDate } : {}),
+            ...(deliveryLabel ? { delivery_label: deliveryLabel } : {}),
             recipes: menu.recipes.map(menuCard),
           },
         };

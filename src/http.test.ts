@@ -802,6 +802,8 @@ describe("/mcp authentication", () => {
       assert.match(menuHtml, /Précédent/);
       assert.match(menuHtml, /Valider/);
       assert.match(menuHtml, /week_label/);
+      assert.match(menuHtml, /function isoWeekLabel/);
+      assert.match(menuHtml, /Livraison le/);
       assert.deepEqual(contents[0]?._meta?.ui?.csp?.resourceDomains, [
         "https://img.hellofresh.com",
         "https://unpkg.com",
@@ -817,10 +819,14 @@ describe("/mcp authentication", () => {
       const structured = menu.result?.structuredContent as {
         week_id: string;
         week_label: string;
+        delivery_date?: string;
+        delivery_label?: string;
         recipes: Array<{ name: string; imageUrl?: string; description: string }>;
       };
       assert.equal(structured.week_id, WEEK);
       assert.equal(structured.week_label, "29 décembre 2098 – 4 janvier 2099");
+      assert.equal(structured.delivery_date, "2099-01-06T00:00:00+0000");
+      assert.equal(structured.delivery_label, "6 janvier 2099");
       assert.equal(structured.recipes[0]?.name, "Tacos");
       assert.equal(structured.recipes[0]?.description, "Crispy");
       assert.equal(
@@ -830,6 +836,7 @@ describe("/mcp authentication", () => {
       const menuText = (menu.result?.content as Array<{ text?: string }> | undefined)?.[0]?.text ?? "";
       assert.match(menuText, /Tacos/);
       assert.match(menuText, /\/image\/tacos\.jpg/);
+      assert.match(menuText, /6 janvier 2099/);
 
       const details = await rpc("tools/call", {
         name: "get_recipe_details",

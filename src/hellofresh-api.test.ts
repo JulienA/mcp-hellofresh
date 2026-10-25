@@ -795,6 +795,7 @@ describe("upcoming deliveries", () => {
     assert.equal(subscription.nextDeliveryDate, "2026-10-31T12:00:00+0100");
     const menu = await api.getMenu(0);
     assert.equal(menu.weekId, "2026-W45");
+    assert.equal(menu.deliveryDate, "2026-10-31T12:00:00+0100");
     assert.deepEqual(
       menu.recipes.map((recipe) => recipe.name),
       ["Poulet", "Soupe", "Tacos", "Riz"]

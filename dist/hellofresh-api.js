@@ -160,7 +160,7 @@ class HelloFreshApi {
                 throw new HelloFreshApiError("api", `No HelloFresh menu week at offset ${weekOffset}.`);
             }
             const recipes = await this.recipesForWeek(subscription, week, true);
-            return { weekId: week.weekId, recipes };
+            return { weekId: week.weekId, deliveryDate: week.deliveryDate, recipes };
         });
     }
     async getRecipe(recipeId) {

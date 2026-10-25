@@ -12,4 +12,6 @@ export declare function listRecipeUiResources(): Array<Omit<RecipeUiDocument, "t
 export declare function readRecipeUiResource(uri: string): RecipeUiDocument | undefined;
 /** ISO week `YYYY-Www` as a French Monday–Sunday range, e.g. "9 – 15 novembre 2026". */
 export declare function menuWeekLabel(weekId: string): string;
+/** Calendar date from a HelloFresh timestamp, e.g. "31 octobre 2026". */
+export declare function deliveryDateLabel(deliveryDate: string): string;
 //# sourceMappingURL=recipe-ui.d.ts.map
