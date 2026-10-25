@@ -166,7 +166,7 @@ const TOOLS: Tool[] = [
   {
     name: "get_menu",
     description:
-      "Get the current week's available recipes/meals from HelloFresh. Optionally specify a week offset to see future menus.",
+      "Get the current week's available recipes/meals from HelloFresh. Each recipe includes its name, headline, prep time in minutes when HelloFresh sends one, the card label, and tags. Use get_recipe_details for ingredients, steps, nutrition, or allergens. Optionally specify a week offset to see future menus.",
     inputSchema: {
       type: "object",
       properties: {

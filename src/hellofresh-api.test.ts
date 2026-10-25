@@ -323,8 +323,80 @@ describe("HelloFreshApi requests", () => {
     const menu = await api.getMenu(0);
     assert.equal(menu.weekId, WEEK);
     assert.equal(menu.recipes[0]?.name, "Tacos");
+    assert.equal(menu.recipes[0]?.prepTime, null);
+    assert.equal(menu.recipes[0]?.label, undefined);
+    assert.deepEqual(menu.recipes[0]?.tags, []);
     assert.equal(updates.at(-1)?.accessToken, "new-access");
     assert.ok(calls.some((call) => call.url.includes("/gw/refresh")));
+  });
+
+  it("reads prep time and labels from the menu", async () => {
+    const { fetchImpl } = recorded((call) => {
+      if (call.url.includes("/my-deliveries/menu")) {
+        return Response.json({
+          week: WEEK,
+          meals: [
+            {
+              index: 1,
+              recipe: {
+                id: "recipe-quick",
+                name: "Poulet",
+                headline: "et riz",
+                prepTime: "PT25M",
+                totalTime: "PT1H15M",
+                label: { text: "Rapide", handle: "quick", displayLabel: true },
+                tags: [
+                  { name: "Rapide", type: "quick", displayLabel: true },
+                  { name: "Veggie", type: "veggie", displayLabel: true },
+                  { name: "pork-free", type: "pork-free", displayLabel: false },
+                ],
+              },
+            },
+            {
+              index: 2,
+              recipe: { id: "recipe-plain", name: "Soupe", headline: "du jour" },
+            },
+            {
+              index: 3,
+              recipe: {
+                id: "recipe-long",
+                name: "Boeuf",
+                prepTime: "PT1H15M",
+                label: { text: "Nouveau", displayLabel: false },
+                tags: ["Famille", "famille"],
+              },
+            },
+            {
+              index: 4,
+              recipe: { id: "recipe-number", name: "Riz", prepTime: "30" },
+            },
+            {
+              index: 5,
+              recipe: { id: "recipe-total", name: "Poisson", totalTime: 40 },
+            },
+          ],
+        });
+      }
+      return okAccount(call) ?? Response.json({}, { status: 404 });
+    });
+    const api = new HelloFreshApi(stored("access", Math.floor(Date.now() / 1000), 1800), fetchImpl);
+    const menu = await api.getMenu(0);
+    const quick = menu.recipes.find((recipe) => recipe.id === "recipe-quick");
+    const plain = menu.recipes.find((recipe) => recipe.id === "recipe-plain");
+    const long = menu.recipes.find((recipe) => recipe.id === "recipe-long");
+    const numeric = menu.recipes.find((recipe) => recipe.id === "recipe-number");
+    const total = menu.recipes.find((recipe) => recipe.id === "recipe-total");
+    assert.equal(quick?.prepTime, 25);
+    assert.equal(quick?.label, "Rapide");
+    assert.deepEqual(quick?.tags, ["Veggie"]);
+    assert.equal(plain?.prepTime, null);
+    assert.equal(plain?.label, undefined);
+    assert.deepEqual(plain?.tags, []);
+    assert.equal(long?.prepTime, 75);
+    assert.equal(long?.label, undefined);
+    assert.deepEqual(long?.tags, ["Famille"]);
+    assert.equal(numeric?.prepTime, 30);
+    assert.equal(total?.prepTime, 40);
   });
 
   it("asks to reconnect when refresh is rejected and no password is kept", async () => {
