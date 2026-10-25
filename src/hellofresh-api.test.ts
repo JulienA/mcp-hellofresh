@@ -676,6 +676,31 @@ describe("HelloFreshApi.getRecipeImage", () => {
     assert.equal(calls.some((call) => call.url.includes("img.hellofresh.com")), false);
   });
 
+  it("rebuilds a broken CloudFront imageLink from its /image path", async () => {
+    const cloudfront =
+      "https://d3hvwccx09j84u.cloudfront.net/0,0/image/HF_Y26_R220_W14_FR_QFR53215-2_Main_high-1906ee87.jpg";
+    const resized =
+      "https://img.hellofresh.com/w_800,c_limit,f_jpg,q_auto,fl_lossy/hellofresh_s3/image/HF_Y26_R220_W14_FR_QFR53215-2_Main_high-1906ee87.jpg";
+    const { api, calls } = apiFor((call) => {
+      if (call.url.includes("/recipes/recipes/")) {
+        return Response.json({
+          id: "6a72e7f4ebec54be3cd9b330",
+          name: "Poulet",
+          imageLink: cloudfront,
+          imagePath: "/image/HF_Y26_R220_W14_FR_QFR53215-2_Main_high-1906ee87.jpg",
+        });
+      }
+      if (call.url === resized) {
+        return new Response(TINY_JPEG, { headers: { "content-type": "image/jpeg" } });
+      }
+      return undefined;
+    });
+    const image = await api.getRecipeImage("6a72e7f4ebec54be3cd9b330");
+    assert.equal(image.url, resized);
+    assert.equal(image.data, TINY_JPEG.toString("base64"));
+    assert.equal(calls.some((call) => call.url.includes("cloudfront.net")), false);
+  });
+
   it("does not fetch an image hosted outside the HelloFresh CDN", async () => {
     const { api, calls } = apiFor((call) => {
       if (call.url.includes("/recipes/recipes/")) {

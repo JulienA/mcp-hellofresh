@@ -167,7 +167,7 @@ claude mcp add hellofresh -- npx -y @striderlabs/mcp-hellofresh
 
 `get_recipe_details`: `recipe_id` required.
 
-`get_recipe_image`: `recipe_id` required. Returns the photo and its public CDN URL.
+`get_recipe_image`: `recipe_id` required. Returns the photo and its public `img.hellofresh.com` URL. A CloudFront `imageLink` is not fetched; the tool uses `imagePath`, or the `/image/...` part of that link.
 
 `select_meals`: `week_id` required, `meals` required. Each meal has `recipe_id` and optional `quantity` (1–10, default 1). `quantity` is how many cartons of that recipe go in the box, so `2` orders the same recipe twice. The same recipe listed twice has its quantities added, up to 10. Portions per meal stay on the subscription plan. Use `modify_subscription` to change them.
 
