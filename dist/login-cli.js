@@ -16,6 +16,10 @@ Complete "Continue with Google" in that window (display required).
 The HelloFresh session is saved to HELLOFRESH_SESSION_PATH or
 ~/.config/mcp-hellofresh/session.json (mode 0600).
 
+To use a remote HTTP MCP server (claude.ai / ChatGPT connectors), copy
+that session.json onto the server and set HELLOFRESH_SESSION_PATH there.
+The HTTP login tool will not open a browser.
+
 Do not pass a Google password. Optional HelloFresh password accounts
 can still use HELLOFRESH_EMAIL / HELLOFRESH_PASSWORD with the MCP server.
 `);

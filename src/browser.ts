@@ -6,6 +6,7 @@ import {
   readOptionalPasswordCredentials,
   toAuthError,
 } from "./auth.js";
+import { assertInteractiveLoginAllowed } from "./login-mode.js";
 import {
   deletePersistedSession,
   filterHelloFreshStorageState,
@@ -223,6 +224,9 @@ export class HelloFreshBrowser {
    * Continue with Google. Requires a display. Never collects Google secrets.
    */
   async interactiveLogin(): Promise<{ path: string; savedAt: string }> {
+    assertInteractiveLoginAllowed({
+      hasInjectedHeadedLauncher: Boolean(this.options.launchHeaded),
+    });
     return this.mutex.runExclusive(async () => {
       try {
         return await this.interactiveLoginUnlocked();

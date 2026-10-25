@@ -3,5 +3,7 @@ node_modules/
 dist-test/
 session.json
 *.session.json
+oauth-store.json
+*.oauth-store.json
 .mcp-hellofresh/
 
