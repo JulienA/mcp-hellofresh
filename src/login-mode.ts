@@ -1,7 +1,10 @@
 import { AuthError } from "./auth.js";
 
+export const HTTP_LOGIN_MESSAGE =
+  "Disconnect this connector in Claude or ChatGPT, then connect it again. Sign in on the authorize page with your HelloFresh password, or paste apiV2Auth after you sign in on the HelloFresh website (Continue with Google included). Do not send a password to this tool.";
+
 export const HEADLESS_LOGIN_MESSAGE =
-  "Interactive Google SSO is not available in HTTP/headless mode. On a machine with a screen, run `npm run login`, then copy session.json onto this server and set HELLOFRESH_SESSION_PATH. Never store or automate Google credentials.";
+  "Interactive sign-in needs a display. Run `npm run login` and finish Continue with Google in that window. A remote HTTP connector is signed in on its authorize page instead. Do not send a Google password.";
 
 export function isHttpMode(
   argv: readonly string[] = process.argv.slice(2),
@@ -34,7 +37,7 @@ export function interactiveLoginBlockedReason(options: {
   hasInjectedHeadedLauncher?: boolean;
 } = {}): string | undefined {
   if (options.httpMode) {
-    return HEADLESS_LOGIN_MESSAGE;
+    return HTTP_LOGIN_MESSAGE;
   }
   if (options.hasInjectedHeadedLauncher) {
     return undefined;
@@ -49,7 +52,7 @@ export function assertInteractiveLoginAllowed(options: {
   httpMode?: boolean;
   env?: NodeJS.ProcessEnv;
   hasInjectedHeadedLauncher?: boolean;
-}): void {
+} = {}): void {
   const reason = interactiveLoginBlockedReason(options);
   if (reason) {
     throw AuthError.loginFailed(reason);

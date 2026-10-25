@@ -1,0 +1,1096 @@
+import { AsyncMutex } from "./auth.js";
+import {
+  emailFromClaims,
+  findEmail,
+  normalizeEmail,
+  userIdFor,
+  decodeJwtClaims,
+  type ParsedAuthBlob,
+  type StoredAccount,
+} from "./accounts.js";
+import { helloFreshCountry, type HelloFreshCountry } from "./countries.js";
+
+export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
+
+export type HelloFreshApiCode =
+  | "invalid_credentials"
+  | "bot_blocked"
+  | "rate_limited"
+  | "reconnect_required"
+  | "missing_email"
+  | "invalid_token"
+  | "unsupported"
+  | "api";
+
+export class HelloFreshApiError extends Error {
+  readonly code: HelloFreshApiCode;
+
+  constructor(code: HelloFreshApiCode, message: string) {
+    super(message);
+    this.name = "HelloFreshApiError";
+    this.code = code;
+  }
+}
+
+export const RECONNECT_MESSAGE =
+  "HelloFresh access expired. Disconnect the connector in Claude or ChatGPT and connect it again, then sign in on the authorize page. Do not send a password in chat.";
+
+export const RATE_RECIPE_UNSUPPORTED =
+  "rate_recipe is not available through the HelloFresh API this connector uses. Rate the recipe on the HelloFresh website.";
+
+const USER_AGENT =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+export interface RecipeSummary {
+  id: string;
+  name: string;
+  description: string;
+  imageUrl?: string;
+  prepTime: number;
+  tags: string[];
+  index?: number;
+}
+
+export interface AccountStatus {
+  authenticated: boolean;
+  email: string | null;
+  country: string | null;
+  accessTokenValid: boolean;
+  savedAt: string | null;
+  reconnectRequired: boolean;
+}
+
+interface SubscriptionRecord {
+  id: string;
+  customerPlanId?: string;
+  customerId?: string;
+  locale?: string;
+  preset?: string;
+  postcode?: string;
+  deliveryOption?: string;
+  sku?: string;
+  meals?: number;
+  servings?: number;
+  deliveryInterval?: number;
+  status?: string;
+  raw: Record<string, unknown>;
+}
+
+export interface DeliveryWeek {
+  weekId: string;
+  deliveryDate?: string;
+  cutoffDate?: string;
+  status?: string;
+  subscriptionId?: string;
+  sku?: string;
+}
+
+interface WeekRecord extends DeliveryWeek {
+  raw: Record<string, unknown>;
+}
+
+export class HelloFreshApi {
+  private readonly mutex = new AsyncMutex();
+  private account: StoredAccount;
+  readonly country: HelloFreshCountry;
+
+  private reloginTried = false;
+
+  constructor(
+    account: StoredAccount,
+    private readonly fetchImpl: FetchLike,
+    private readonly hooks: {
+      onUpdate?: (account: StoredAccount) => Promise<void>;
+      /** Stdio only. HTTP never supplies a password relogin. */
+      relogin?: () => Promise<StoredAccount>;
+    } = {}
+  ) {
+    const country = helloFreshCountry(account.country);
+    if (!country) {
+      throw new HelloFreshApiError("api", `Unknown HelloFresh country: ${account.country}`);
+    }
+    this.country = country;
+    this.account = account;
+  }
+
+  get email(): string {
+    return this.account.email;
+  }
+
+  static async login(input: {
+    email: string;
+    password: string;
+    country: string;
+    fetchImpl?: FetchLike;
+  }): Promise<HelloFreshApi> {
+    const country = requireCountry(input.country);
+    const fetchImpl = input.fetchImpl ?? fetch;
+    const now = Math.floor(Date.now() / 1000);
+    const payload = await authPost(fetchImpl, country, "/gw/login", {
+      username: input.email.trim(),
+      password: input.password,
+    });
+    const account = accountFromAuthPayload(payload, country.code, normalizeEmail(input.email), now);
+    const api = new HelloFreshApi(account, fetchImpl);
+    try {
+      await api.assertSubscriptions();
+    } catch (error) {
+      if (error instanceof HelloFreshApiError && error.code === "reconnect_required") {
+        throw new HelloFreshApiError(
+          "invalid_credentials",
+          "HelloFresh did not accept these credentials."
+        );
+      }
+      throw error;
+    }
+    const discovered = await api.discoverEmail();
+    if (discovered) {
+      api.account = { ...api.account, email: discovered, userId: userIdFor(country.code, discovered) };
+    }
+    return api;
+  }
+
+  static async fromPasted(input: {
+    token: string;
+    country: string;
+    fetchImpl?: FetchLike;
+    parsed?: ParsedAuthBlob;
+  }): Promise<HelloFreshApi> {
+    const country = requireCountry(input.country);
+    const parsed = input.parsed;
+    if (!parsed?.accessToken) {
+      throw new HelloFreshApiError("invalid_token", "That apiV2Auth value could not be read.");
+    }
+    const fetchImpl = input.fetchImpl ?? fetch;
+    const now = Math.floor(Date.now() / 1000);
+    const claims = decodeJwtClaims(parsed.accessToken);
+    const account: StoredAccount = {
+      userId: "pending",
+      email: emailFromClaims(claims) ?? "",
+      country: country.code,
+      accessToken: parsed.accessToken,
+      refreshToken: parsed.refreshToken,
+      issuedAt: parsed.issuedAt ?? now,
+      expiresIn: parsed.expiresIn ?? 0,
+      refreshExpiresIn: parsed.refreshExpiresIn,
+      refreshIssuedAt: parsed.refreshIssuedAt,
+      tokenType: parsed.tokenType,
+      savedAt: new Date().toISOString(),
+    };
+    const api = new HelloFreshApi(account, fetchImpl);
+    try {
+      await api.assertSubscriptions();
+    } catch (error) {
+      if (error instanceof HelloFreshApiError && error.code === "reconnect_required") {
+        throw new HelloFreshApiError("invalid_token", "HelloFresh rejected that apiV2Auth value.");
+      }
+      throw error;
+    }
+    const email = (await api.discoverEmail()) ?? (account.email || undefined);
+    if (!email) {
+      throw new HelloFreshApiError(
+        "missing_email",
+        "HelloFresh did not return an email for this account, so it cannot be linked."
+      );
+    }
+    api.account = {
+      ...api.account,
+      email,
+      userId: userIdFor(country.code, email),
+      savedAt: new Date().toISOString(),
+    };
+    return api;
+  }
+
+  toStoredAccount(): StoredAccount {
+    return { ...this.account, userId: userIdFor(this.account.country, this.account.email) };
+  }
+
+  status(): AccountStatus {
+    return {
+      authenticated: true,
+      email: this.account.email,
+      country: this.account.country,
+      accessTokenValid: !this.accessExpiring(0),
+      savedAt: this.account.savedAt,
+      reconnectRequired: false,
+    };
+  }
+
+  async getMenu(weekOffset = 0): Promise<{ weekId: string; recipes: RecipeSummary[] }> {
+    return this.mutex.runExclusive(async () => {
+      const { subscription, weeks } = await this.loadWeeks();
+      const upcoming = upcomingWeeks(weeks);
+      const week = upcoming[weekOffset];
+      if (!week) {
+        throw new HelloFreshApiError("api", `No HelloFresh menu week at offset ${weekOffset}.`);
+      }
+      const recipes = await this.recipesForWeek(subscription, week);
+      return { weekId: week.weekId, recipes };
+    });
+  }
+
+  async getRecipe(recipeId: string): Promise<Record<string, unknown>> {
+    return this.mutex.runExclusive(async () => {
+      const bare = recipeId.split("-", 1)[0]?.trim();
+      if (!bare) {
+        throw new HelloFreshApiError("api", "A recipe id is required.");
+      }
+      const payload = await this.getJson(`/gw/recipes/recipes/${encodeURIComponent(bare)}`, {
+        country: this.country.apiCountry,
+        locale: this.country.locale,
+      });
+      return payload && typeof payload === "object" ? (payload as Record<string, unknown>) : { id: bare };
+    });
+  }
+
+  async selectMeals(
+    weekId: string,
+    meals: Array<{ recipeId: string; servings?: number }>
+  ): Promise<Record<string, unknown>> {
+    return this.mutex.runExclusive(async () => {
+      const { subscription, weeks } = await this.loadWeeks();
+      const week = weeks.find((item) => item.weekId === weekId);
+      if (!week) {
+        throw new HelloFreshApiError("api", `Week ${weekId} was not found on this account.`);
+      }
+      const recipes = await this.recipesForWeek(subscription, week);
+      const selected = meals.map((meal) => {
+        const recipe = recipes.find((item) => item.id === meal.recipeId);
+        if (!recipe || recipe.index === undefined) {
+          throw new HelloFreshApiError(
+            "api",
+            `Recipe ${meal.recipeId} is not on the menu for ${weekId}.`
+          );
+        }
+        const fallback = subscription.servings && subscription.servings > 0 ? subscription.servings : 1;
+        const quantity = meal.servings && meal.servings > 0 ? meal.servings : fallback;
+        return { index: recipe.index, quantity };
+      });
+      const customerId = subscription.customerId;
+      const sku = resizeSku(week.sku || subscription.sku || "", selected.reduce((sum, meal) => sum + meal.quantity, 0));
+      const cutoff = formatCutoff(week.cutoffDate);
+      if (!customerId || !sku || !cutoff || !subscription.id) {
+        throw new HelloFreshApiError(
+          "api",
+          `Week ${weekId} is missing the cart details HelloFresh needs to save a selection.`
+        );
+      }
+      const params = new URLSearchParams({
+        customer: customerId,
+        cutoff_time: cutoff,
+        ignore_addons: "false",
+        preference: subscription.preset ?? "",
+        "product-sku": sku,
+        subscription: subscription.id,
+        update_quantity: "true",
+        week: weekId,
+      });
+      const body = await this.request("PUT", `/gw/v1/carts/${encodeURIComponent(weekId)}?${params}`, {
+        extras: [],
+        meals: selected,
+      }, { "x-requested-by": "shopping-experience-web" });
+      return { weekId, meals: selected, result: body ?? { ok: true } };
+    });
+  }
+
+  async skipWeek(weekId: string): Promise<Record<string, unknown>> {
+    return this.mutex.runExclusive(async () => {
+      const { weeks } = await this.loadWeeks();
+      const week = requireWeek(weeks, weekId);
+      await this.patchDeliveryStatus(week, "PAUSED");
+      return { weekId, status: "PAUSED" };
+    });
+  }
+
+  async getDeliveries(): Promise<DeliveryWeek[]> {
+    return this.mutex.runExclusive(async () => {
+      const { weeks } = await this.loadWeeks();
+      return weeks.map((week) => ({
+        weekId: week.weekId,
+        deliveryDate: week.deliveryDate,
+        cutoffDate: week.cutoffDate,
+        status: week.status,
+        subscriptionId: week.subscriptionId,
+        sku: week.sku,
+      }));
+    });
+  }
+
+  async modifyDelivery(weekId: string, newDate: string): Promise<Record<string, unknown>> {
+    return this.mutex.runExclusive(async () => {
+      const { subscription, weeks } = await this.loadWeeks();
+      const week = requireWeek(weeks, weekId);
+      const options = await this.deliveryOptions(subscription);
+      const match = options.find((option) => option.date?.startsWith(newDate));
+      if (!match) {
+        throw new HelloFreshApiError(
+          "api",
+          `HelloFresh has no delivery option on ${newDate} for this plan.`
+        );
+      }
+      await this.request(
+        "POST",
+        `/gw/api/subscriptions/${encodeURIComponent(week.subscriptionId || subscription.id)}/oneoff${this.query()}`,
+        {
+          id: week.subscriptionId || subscription.id,
+          delivery_option: match.handle,
+          week: weekId,
+          source: "reschedule-delivery-feature",
+        }
+      );
+      return { weekId, deliveryOption: match.handle, date: match.date ?? newDate };
+    });
+  }
+
+  async getPreferences(): Promise<Record<string, unknown>> {
+    return this.mutex.runExclusive(async () => {
+      const profile = await this.getJson("/gw/profile-service/v2/customers/me/profile", this.profileParams());
+      return preferencesFromProfile(profile);
+    });
+  }
+
+  async updatePreferences(changes: {
+    vegetarian?: boolean;
+    familyFriendly?: boolean;
+    dietaryPreferences?: string[];
+    allergens?: string[];
+    cuisinePreferences?: string[];
+  }): Promise<Record<string, unknown>> {
+    return this.mutex.runExclusive(async () => {
+      const current = await this.getJson("/gw/profile-service/v2/customers/me/profile", this.profileParams());
+      const taste =
+        current && typeof current === "object" && "taste" in current && typeof current.taste === "object"
+          ? { ...(current.taste as Record<string, unknown>) }
+          : {};
+      if (changes.dietaryPreferences) {
+        taste.dietaryPreferences = changes.dietaryPreferences;
+      }
+      if (changes.allergens) {
+        taste.exclusions = changes.allergens;
+      }
+      if (changes.cuisinePreferences) {
+        taste.cuisines = changes.cuisinePreferences;
+      }
+      if (changes.vegetarian !== undefined) {
+        taste.vegetarian = changes.vegetarian;
+      }
+      if (changes.familyFriendly !== undefined) {
+        taste.familyFriendly = changes.familyFriendly;
+      }
+      const updated = await this.request(
+        "PATCH",
+        `/gw/profile-service/v2/customers/me/profile${this.query(this.profileParams("food-profile"))}`,
+        { taste }
+      );
+      return preferencesFromProfile(updated ?? { taste });
+    });
+  }
+
+  async getSubscription(): Promise<Record<string, unknown>> {
+    return this.mutex.runExclusive(async () => {
+      const { subscription, weeks } = await this.loadWeeks();
+      const next = upcomingWeeks(weeks)[0];
+      const size = skuSize(subscription.sku);
+      return {
+        planId: subscription.customerPlanId ?? subscription.id,
+        mealsPerWeek: subscription.meals ?? size.meals ?? 0,
+        servingsPerMeal: subscription.servings ?? size.servings ?? 0,
+        frequency: subscription.deliveryInterval === 2 ? "biweekly" : "weekly",
+        pricePerServing: 0,
+        nextDeliveryDate: next?.deliveryDate ?? "",
+        status: subscription.status ?? "active",
+        sku: subscription.sku ?? null,
+      };
+    });
+  }
+
+  async modifySubscription(changes: {
+    mealsPerWeek?: number;
+    servingsPerMeal?: number;
+    frequency?: "weekly" | "biweekly";
+  }): Promise<Record<string, unknown>> {
+    return this.mutex.runExclusive(async () => {
+      const { subscription } = await this.loadWeeks();
+      const size = skuSize(subscription.sku);
+      const meals = changes.mealsPerWeek ?? subscription.meals ?? size.meals;
+      const servings = changes.servingsPerMeal ?? subscription.servings ?? size.servings;
+      if (!subscription.customerPlanId || !meals || !servings) {
+        throw new HelloFreshApiError("api", "This subscription does not expose a plan that can be changed.");
+      }
+      const handle =
+        (await this.matchingProductHandle(subscription, meals, servings)) ||
+        resizePlanSku(subscription.sku || "", meals, servings);
+      if (!handle) {
+        throw new HelloFreshApiError("api", "HelloFresh did not return a product handle for that box size.");
+      }
+      await this.request(
+        "PATCH",
+        `/gw/api/plans/${encodeURIComponent(subscription.customerPlanId)}${this.query()}`,
+        { productHandle: handle }
+      );
+      return {
+        productHandle: handle,
+        mealsPerWeek: meals,
+        servingsPerMeal: servings,
+        frequencyApplied: false,
+        frequencyNote: changes.frequency
+          ? "Delivery frequency is unchanged. HelloFresh changes that separately from the box size."
+          : undefined,
+      };
+    });
+  }
+
+  async getPastOrders(limit: number): Promise<Array<Record<string, unknown>>> {
+    return this.mutex.runExclusive(async () => {
+      const payload = await this.getJson("/gw/my-deliveries/past-deliveries", {
+        country: this.country.apiCountry,
+        locale: this.country.locale,
+      });
+      const weeks = asList(payload, ["weeks", "items", "data"])
+        .map(asRecord)
+        .filter((item): item is Record<string, unknown> => Boolean(item));
+      return weeks.slice(0, limit).map((week) => ({
+        orderId: stringField(week, ["id", "week", "weekId"]) ?? "",
+        deliveryDate: stringField(week, ["deliveryDate", "delivery_date"]) ?? "",
+        status: stringField(week, ["status", "state"]) ?? "",
+        meals: [],
+        totalPrice: 0,
+      }));
+    });
+  }
+
+  private async assertSubscriptions(): Promise<void> {
+    const payload = await this.getJson("/gw/api/customers/me/subscriptions");
+    const items = asList(payload, ["items"]);
+    if (items.length === 0) {
+      throw new HelloFreshApiError("invalid_token", "HelloFresh returned no subscription for this account.");
+    }
+  }
+
+  private async discoverEmail(): Promise<string | undefined> {
+    try {
+      const info = await this.getJson("/gw/api/customers/me/info");
+      return findEmail(info);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async loadWeeks(): Promise<{ subscription: SubscriptionRecord; weeks: WeekRecord[] }> {
+    const subscription = await this.primarySubscription();
+    const payload = await this.getJson("/gw/api/customers/me/deliveries", {
+      country: this.country.apiCountry,
+      locale: subscription.locale || this.country.locale,
+    });
+    const weeks = asList(payload, ["items", "deliveries", "weeks", "data"])
+      .map((item) => weekFromRaw(item, subscription.id))
+      .filter((item): item is WeekRecord => Boolean(item));
+    return { subscription, weeks };
+  }
+
+  private async primarySubscription(): Promise<SubscriptionRecord> {
+    const payload = await this.getJson("/gw/api/customers/me/subscriptions");
+    const first = asList(payload, ["items"]).map(asRecord).find((item) => item);
+    if (!first) {
+      throw new HelloFreshApiError("reconnect_required", RECONNECT_MESSAGE);
+    }
+    return subscriptionFromRaw(first);
+  }
+
+  private async recipesForWeek(subscription: SubscriptionRecord, week: WeekRecord): Promise<RecipeSummary[]> {
+    const embedded = recipesFromPayload(week.raw);
+    const params = menuParams(subscription, week);
+    if (!params) {
+      return embedded;
+    }
+    try {
+      const payload = await this.getJson("/gw/my-deliveries/menu", params);
+      if (payload && typeof payload === "object" && "week" in payload && payload.week && payload.week !== week.weekId) {
+        return embedded;
+      }
+      const fromMenu = recipesFromPayload(payload);
+      return fromMenu.length > 0 ? fromMenu : embedded;
+    } catch (error) {
+      if (embedded.length > 0) {
+        return embedded;
+      }
+      throw error;
+    }
+  }
+
+  private async patchDeliveryStatus(week: WeekRecord, status: string): Promise<void> {
+    if (!week.subscriptionId || !week.deliveryDate) {
+      throw new HelloFreshApiError("api", `Week ${week.weekId} cannot be skipped without a delivery date.`);
+    }
+    const delivery: Record<string, unknown> = {
+      deliveryDate: week.deliveryDate,
+      status,
+      subscriptionId: week.subscriptionId,
+      id: week.weekId,
+    };
+    if (week.cutoffDate) {
+      delivery.cutoffDate = week.cutoffDate;
+    }
+    await this.request(
+      "PATCH",
+      `/gw/api/subscriptions/${encodeURIComponent(week.subscriptionId)}/delivery_dates/${encodeURIComponent(week.weekId)}${this.query()}`,
+      { delivery }
+    );
+  }
+
+  private async deliveryOptions(
+    subscription: SubscriptionRecord
+  ): Promise<Array<{ handle: string; date?: string }>> {
+    const family = nestedString(subscription.raw, ["productType", "family", "handle"]) || nestedString(subscription.raw, ["family"]);
+    if (!family || !subscription.postcode) {
+      return [];
+    }
+    const payload = await this.getJson("/gw/api/delivery_dates_options", {
+      country: this.country.apiCountry,
+      locale: subscription.locale || this.country.locale,
+      family,
+      numDeliveries: "7",
+      zip: subscription.postcode,
+      customerPriority: "active_subscription",
+      customerJourney: "account_setting",
+    });
+    const options: Array<{ handle: string; date?: string }> = [];
+    for (const item of asList(payload, ["items"])) {
+      const record = asRecord(item);
+      if (!record) {
+        continue;
+      }
+      const date = stringField(record, ["deliveryDate", "delivery_date", "date"]);
+      for (const rawOption of asList(record, ["deliveryOptions", "delivery_options"])) {
+        const option = asRecord(rawOption);
+        const handle = option ? stringField(option, ["handle", "id"]) : undefined;
+        if (handle) {
+          options.push({
+            handle,
+            date: (option && stringField(option, ["deliveryDate", "date"])) || date,
+          });
+        }
+      }
+    }
+    return options;
+  }
+
+  private async matchingProductHandle(
+    subscription: SubscriptionRecord,
+    meals: number,
+    servings: number
+  ): Promise<string | undefined> {
+    try {
+      const payload = await this.getJson(
+        `/gw/api/subscriptions/${encodeURIComponent(subscription.id)}/product_options`,
+        { country: this.country.apiCountry, locale: subscription.locale || this.country.locale }
+      );
+      for (const item of asList(payload, ["items", "products", "options"])) {
+        const record = asRecord(item);
+        if (!record) {
+          continue;
+        }
+        const handle = stringField(record, ["handle", "sku"]);
+        const size = skuSize(handle);
+        const itemMeals = numberField(record, ["meals"]) ?? size.meals;
+        const itemServings = numberField(record, ["servings", "size"]) ?? size.servings;
+        if (handle && itemMeals === meals && itemServings === servings) {
+          return handle;
+        }
+      }
+    } catch {
+      return undefined;
+    }
+    return undefined;
+  }
+
+  private query(params: Record<string, string> = {}): string {
+    const search = new URLSearchParams({
+      country: this.country.apiCountry,
+      locale: this.country.locale,
+      ...params,
+    });
+    return `?${search}`;
+  }
+
+  private profileParams(source?: string): Record<string, string> {
+    return {
+      brand: "BRAND_HELLOFRESH",
+      exclusion: "v2",
+      regionCode: this.country.apiCountry,
+      ...(source ? { source } : {}),
+    };
+  }
+
+  private accessExpiring(skewSeconds: number): boolean {
+    return Math.floor(Date.now() / 1000) + skewSeconds >= this.account.issuedAt + this.account.expiresIn;
+  }
+
+  private async getJson(path: string, params?: Record<string, string>): Promise<unknown> {
+    const search = params ? `?${new URLSearchParams(params)}` : this.query();
+    const url = path.includes("?") ? path : `${path}${search}`;
+    return this.request("GET", url);
+  }
+
+  private async request(
+    method: string,
+    path: string,
+    body?: unknown,
+    extraHeaders?: Record<string, string>,
+    retried = false
+  ): Promise<unknown> {
+    if (this.accessExpiring(60) && this.account.refreshToken) {
+      await this.refresh();
+    }
+    const response = await this.fetchImpl(`${this.country.baseUrl}${path}`, {
+      method,
+      headers: {
+        Accept: "application/json, text/plain, */*",
+        Authorization: `Bearer ${this.account.accessToken}`,
+        Origin: this.country.baseUrl,
+        Referer: `${this.country.baseUrl}/my-account`,
+        "User-Agent": USER_AGENT,
+        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+        ...extraHeaders,
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+    if (response.status === 401 && !retried && this.account.refreshToken) {
+      await this.refresh();
+      return this.request(method, path, body, extraHeaders, true);
+    }
+    if (response.status === 401) {
+      throw new HelloFreshApiError("reconnect_required", RECONNECT_MESSAGE);
+    }
+    return readApiResponse(response, "HelloFresh request failed", "api");
+  }
+
+  private async refresh(): Promise<void> {
+    if (!this.account.refreshToken) {
+      await this.tryRelogin();
+      return;
+    }
+    const response = await this.fetchImpl(`${this.country.baseUrl}/gw/refresh${this.query()}`, {
+      method: "POST",
+      headers: {
+        Accept: "*/*",
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.account.accessToken}`,
+        Origin: this.country.baseUrl,
+        Referer: `${this.country.baseUrl}/login`,
+        "User-Agent": USER_AGENT,
+      },
+      body: JSON.stringify({ refresh_token: this.account.refreshToken }),
+    });
+    let payload: unknown;
+    try {
+      payload = await readApiResponse(response, RECONNECT_MESSAGE, "reconnect_required");
+    } catch (error) {
+      if (error instanceof HelloFreshApiError && error.code !== "bot_blocked" && error.code !== "rate_limited") {
+        await this.tryRelogin();
+        return;
+      }
+      throw error;
+    }
+    const now = Math.floor(Date.now() / 1000);
+    const next = accountFromAuthPayload(payload, this.account.country, this.account.email, now);
+    this.account = {
+      ...this.account,
+      accessToken: next.accessToken,
+      refreshToken: next.refreshToken ?? this.account.refreshToken,
+      issuedAt: next.issuedAt,
+      expiresIn: next.expiresIn,
+      refreshExpiresIn: next.refreshExpiresIn ?? this.account.refreshExpiresIn,
+      refreshIssuedAt: next.refreshToken ? next.refreshIssuedAt : this.account.refreshIssuedAt,
+      tokenType: next.tokenType ?? this.account.tokenType,
+      savedAt: next.savedAt,
+    };
+    await this.hooks.onUpdate?.(this.toStoredAccount());
+  }
+
+  private async tryRelogin(): Promise<void> {
+    if (!this.hooks.relogin || this.reloginTried) {
+      throw new HelloFreshApiError("reconnect_required", RECONNECT_MESSAGE);
+    }
+    this.reloginTried = true;
+    this.account = await this.hooks.relogin();
+    await this.hooks.onUpdate?.(this.toStoredAccount());
+  }
+}
+
+export function accountFromAuthPayload(
+  payload: unknown,
+  country: string,
+  email: string,
+  now: number
+): StoredAccount {
+  const record = asRecord(payload);
+  const accessToken = record ? stringField(record, ["access_token", "accessToken"]) : undefined;
+  if (!accessToken) {
+    throw new HelloFreshApiError("api", "HelloFresh did not return an access token.");
+  }
+  const refreshToken = record ? stringField(record, ["refresh_token", "refreshToken"]) : undefined;
+  const expiresIn = (record && numberField(record, ["expires_in", "expiresIn"])) ?? 1800;
+  const refreshExpiresIn = record ? numberField(record, ["refresh_expires_in", "refreshExpiresIn"]) : undefined;
+  return {
+    userId: userIdFor(country, email),
+    email: normalizeEmail(email),
+    country: helloFreshCountry(country)?.code ?? country,
+    accessToken,
+    refreshToken,
+    issuedAt: now,
+    expiresIn,
+    refreshExpiresIn,
+    refreshIssuedAt: refreshToken ? now : undefined,
+    tokenType: record ? stringField(record, ["token_type", "tokenType"]) : undefined,
+    savedAt: new Date(now * 1000).toISOString(),
+  };
+}
+
+async function authPost(
+  fetchImpl: FetchLike,
+  country: HelloFreshCountry,
+  path: string,
+  body: Record<string, string>
+): Promise<unknown> {
+  const params = new URLSearchParams({ country: country.apiCountry, locale: country.locale });
+  let response: Response;
+  try {
+    response = await fetchImpl(`${country.baseUrl}${path}?${params}`, {
+      method: "POST",
+      headers: {
+        Accept: "application/json, text/plain, */*",
+        "Content-Type": "application/json",
+        Origin: country.baseUrl,
+        Referer: `${country.baseUrl}/login`,
+        "User-Agent": USER_AGENT,
+      },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    throw new HelloFreshApiError("api", "HelloFresh could not be reached.");
+  }
+  return readApiResponse(response, "HelloFresh did not accept these credentials.", "invalid_credentials");
+}
+
+async function readApiResponse(
+  response: Response,
+  fallback: string,
+  failure: HelloFreshApiCode
+): Promise<unknown> {
+  const contentType = response.headers.get("content-type") ?? "";
+  const text = await response.text();
+  if (looksBlocked(response.status, contentType, text)) {
+    throw new HelloFreshApiError(
+      "bot_blocked",
+      "HelloFresh blocked the request before it reached the account. This is not a wrong password."
+    );
+  }
+  if (response.status === 429) {
+    throw new HelloFreshApiError("rate_limited", "HelloFresh temporarily locked sign-in. Wait and try again.");
+  }
+  if (response.status === 400 || response.status === 401 || response.status === 403) {
+    if (failure === "invalid_credentials" && socialSignInRequired(text)) {
+      throw new HelloFreshApiError(
+        "invalid_credentials",
+        "This HelloFresh account signs in with Google, Apple, or Facebook. Sign in on the HelloFresh website, then paste apiV2Auth."
+      );
+    }
+    throw new HelloFreshApiError(failure, fallback);
+  }
+  if (response.status >= 400) {
+    throw new HelloFreshApiError("api", `HelloFresh returned HTTP ${response.status}.`);
+  }
+  if (!text.trim()) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+function socialSignInRequired(body: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body) as unknown;
+  } catch {
+    return false;
+  }
+  const record = asRecord(parsed);
+  if (!record) {
+    return false;
+  }
+  const hint = [
+    record.error,
+    record.error_description,
+    record.message,
+    record.code,
+    record.reason,
+  ]
+    .filter((item) => typeof item === "string")
+    .join(" ")
+    .toLowerCase();
+  return /google|apple|facebook|social/.test(hint);
+}
+
+function looksBlocked(status: number, contentType: string, body: string): boolean {
+  if (contentType.includes("text/html") && status >= 400) {
+    return true;
+  }
+  const sample = body.slice(0, 400).toLowerCase();
+  return status === 403 && (sample.includes("cloudflare") || sample.includes("just a moment") || sample.includes("<html"));
+}
+
+function requireCountry(code: string): HelloFreshCountry {
+  const country = helloFreshCountry(code);
+  if (!country) {
+    throw new HelloFreshApiError("api", "Choose a HelloFresh country.");
+  }
+  return country;
+}
+
+function upcomingWeeks(weeks: WeekRecord[]): WeekRecord[] {
+  const current = isoWeek(new Date());
+  return [...weeks]
+    .filter((week) => week.weekId >= current && week.status?.toUpperCase() !== "PAUSED")
+    .sort((a, b) => a.weekId.localeCompare(b.weekId));
+}
+
+function requireWeek(weeks: WeekRecord[], weekId: string): WeekRecord {
+  const week = weeks.find((item) => item.weekId === weekId);
+  if (!week) {
+    throw new HelloFreshApiError("api", `Week ${weekId} was not found on this account.`);
+  }
+  return week;
+}
+
+function isoWeek(date: Date): string {
+  const utc = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  const day = utc.getUTCDay() || 7;
+  utc.setUTCDate(utc.getUTCDate() + 4 - day);
+  const yearStart = new Date(Date.UTC(utc.getUTCFullYear(), 0, 1));
+  const week = Math.ceil(((utc.getTime() - yearStart.getTime()) / 86400000 + 1) / 7);
+  return `${utc.getUTCFullYear()}-W${String(week).padStart(2, "0")}`;
+}
+
+function menuParams(subscription: SubscriptionRecord, week: WeekRecord): Record<string, string> | undefined {
+  const sku = week.sku || subscription.sku;
+  const size = skuSize(sku);
+  const servings = subscription.servings || size.servings;
+  if (!subscription.customerPlanId || !subscription.deliveryOption || !subscription.postcode || !sku || !servings) {
+    return undefined;
+  }
+  return {
+    customerPlanId: subscription.customerPlanId,
+    "delivery-option": subscription.deliveryOption,
+    exclude: "",
+    "exclude-feedback": "true",
+    "include-filters": "true",
+    "include-future-feedback": "false",
+    locale: subscription.locale || "en-US",
+    postcode: subscription.postcode,
+    preference: subscription.preset ?? "",
+    "product-sku": sku,
+    servings: String(servings),
+    subscription: subscription.id,
+    week: week.weekId,
+  };
+}
+
+function subscriptionFromRaw(raw: Record<string, unknown>): SubscriptionRecord {
+  const product = asRecord(raw.product);
+  const specs = asRecord(product?.specs);
+  const shipping = asRecord(raw.shippingAddress) ?? asRecord(raw.shipping_address);
+  const option = asRecord(raw.deliveryOption) ?? asRecord(raw.deliveryTime);
+  const customer = asRecord(raw.customer);
+  return {
+    id: stringField(raw, ["id", "subscriptionId"]) ?? "",
+    customerPlanId: stringField(raw, ["customerPlanId", "planId"]),
+    customerId: stringField(customer ?? {}, ["id", "uuid"]) ?? stringField(raw, ["customerId"]),
+    locale: stringField(raw, ["locale"]),
+    preset: stringField(raw, ["preset", "preference", "planPreference"]),
+    postcode: stringField(shipping ?? {}, ["postcode", "postalCode"]),
+    deliveryOption: stringField(option ?? {}, ["handle"]) ?? stringField(raw, ["deliveryTime"]),
+    sku: stringField(product ?? {}, ["sku", "handle"]) ?? stringField(raw, ["productSku"]),
+    meals: numberField(specs ?? {}, ["meals"]) ?? numberField(raw, ["meals"]),
+    servings: numberField(specs ?? {}, ["size", "servings"]),
+    deliveryInterval: numberField(raw, ["deliveryInterval"]),
+    status: stringField(raw, ["status"]),
+    raw,
+  };
+}
+
+function weekFromRaw(value: unknown, fallbackSubscription: string): WeekRecord | undefined {
+  const raw = asRecord(value);
+  if (!raw) {
+    return undefined;
+  }
+  const weekId = stringField(raw, ["id", "week", "weekId"]);
+  if (!weekId || !/^\d{4}-W\d{2}$/.test(weekId)) {
+    return undefined;
+  }
+  const product = asRecord(raw.product);
+  return {
+    weekId,
+    deliveryDate: stringField(raw, ["deliveryDate", "delivery_date"]),
+    cutoffDate: stringField(raw, ["cutoffDate", "cutoff_date"]),
+    status: stringField(raw, ["status", "state"]),
+    subscriptionId: stringField(raw, ["subscriptionId", "subscription_id"]) ?? fallbackSubscription,
+    sku: stringField(product ?? {}, ["handle", "sku"]),
+    raw,
+  };
+}
+
+function recipesFromPayload(payload: unknown): RecipeSummary[] {
+  const meals = [
+    ...asList(payload, ["meals", "courses", "recipes", "items"]),
+  ];
+  const recipes: RecipeSummary[] = [];
+  for (const meal of meals) {
+    const record = asRecord(meal);
+    if (!record) {
+      continue;
+    }
+    const recipe = asRecord(record.recipe) ?? record;
+    const id = stringField(recipe, ["id", "recipeId"]);
+    const name = stringField(recipe, ["name", "title"]);
+    if (!id || !name) {
+      continue;
+    }
+    recipes.push({
+      id,
+      name,
+      description: stringField(recipe, ["headline", "description"]) ?? "",
+      imageUrl: stringField(recipe, ["imagePath", "image", "imageUrl"]),
+      prepTime: numberField(recipe, ["prepTime", "totalTime"]) ?? 0,
+      tags: [],
+      index: numberField(record, ["index"]),
+    });
+  }
+  return recipes;
+}
+
+function preferencesFromProfile(payload: unknown): Record<string, unknown> {
+  const record = asRecord(payload) ?? {};
+  const taste = asRecord(record.taste) ?? record;
+  const dietary = stringArray(taste.dietaryPreferences) ?? stringArray(taste.diets) ?? [];
+  const allergens = stringArray(taste.exclusions) ?? stringArray(taste.allergens) ?? [];
+  const cuisines = stringArray(taste.cuisines) ?? stringArray(taste.cuisinePreferences) ?? [];
+  return {
+    dietaryPreferences: dietary,
+    allergens,
+    cuisinePreferences: cuisines,
+    familyFriendly: taste.familyFriendly === true,
+    vegetarian: taste.vegetarian === true || dietary.some((item) => /vegetarian/i.test(item)),
+  };
+}
+
+function resizeSku(sku: string, mealCount: number): string {
+  const match = /^(?<prefix>.+-)(?<meals>\d+)(?<rest>-\d+-\d+)$/.exec(sku);
+  if (!match?.groups || mealCount < 2) {
+    return sku;
+  }
+  const current = Number(match.groups.meals);
+  if (current <= 0 || current === mealCount) {
+    return sku;
+  }
+  return `${match.groups.prefix}${mealCount}${match.groups.rest}`;
+}
+
+function resizePlanSku(sku: string, meals: number, servings: number): string | undefined {
+  const match = /^(?<prefix>.+-)(?<meals>\d+)-(?<servings>\d+)-(?<tail>\d+)$/.exec(sku);
+  if (!match?.groups) {
+    return undefined;
+  }
+  return `${match.groups.prefix}${meals}-${servings}-${match.groups.tail}`;
+}
+
+function skuSize(sku: string | undefined): { meals?: number; servings?: number } {
+  if (!sku) {
+    return {};
+  }
+  const match = /^.+-(\d+)-(\d+)-\d+$/.exec(sku);
+  if (!match) {
+    return {};
+  }
+  return { meals: Number(match[1]), servings: Number(match[2]) };
+}
+
+function formatCutoff(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/.exec(value);
+  return match?.[1] ?? value;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function asList(value: unknown, keys: string[]): unknown[] {
+  if (Array.isArray(value)) {
+    return value;
+  }
+  const record = asRecord(value);
+  if (!record) {
+    return [];
+  }
+  for (const key of keys) {
+    if (Array.isArray(record[key])) {
+      return record[key] as unknown[];
+    }
+  }
+  return [];
+}
+
+function stringField(record: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) {
+      return value;
+    }
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return String(value);
+    }
+  }
+  return undefined;
+}
+
+function numberField(record: Record<string, unknown>, keys: string[]): number | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) {
+      return Number(value);
+    }
+  }
+  return undefined;
+}
+
+function stringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const items = value.filter((item): item is string => typeof item === "string");
+  return items;
+}
+
+function nestedString(record: Record<string, unknown>, path: string[]): string | undefined {
+  let current: unknown = record;
+  for (const key of path) {
+    const next = asRecord(current);
+    if (!next) {
+      return undefined;
+    }
+    current = next[key];
+  }
+  return typeof current === "string" ? current : undefined;
+}

@@ -52,6 +52,7 @@ class OAuthStore {
             data.tokens[accessHash] = {
                 kind: "access",
                 clientId: input.clientId,
+                userId: input.userId,
                 refreshHash,
                 expiresAt: input.accessExpiresAt,
                 scopes: input.scopes,
@@ -60,6 +61,7 @@ class OAuthStore {
             data.tokens[refreshHash] = {
                 kind: "refresh",
                 clientId: input.clientId,
+                userId: input.userId,
                 accessHash,
                 expiresAt: input.refreshExpiresAt,
                 scopes: input.scopes,

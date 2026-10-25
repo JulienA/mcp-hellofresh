@@ -1,5 +1,6 @@
 import { OAuthError, type AuthInfo, type OAuthMetadata, type OAuthTokenVerifier } from "@modelcontextprotocol/server";
 import { type HttpRuntimeConfig } from "./config.js";
+import type { AccountLinker } from "./account-linker.js";
 import { OAuthStore } from "./oauth-store.js";
 import { timingSafeEqualString } from "./security.js";
 export declare class RateLimiter {
@@ -16,15 +17,17 @@ export declare function oauthErrorResponse(error: OAuthError, status?: number): 
 export declare class OwnerAuthorizationServer implements OAuthTokenVerifier {
     private readonly config;
     private readonly store;
+    private readonly linker;
     private readonly pending;
     private readonly codes;
     readonly rateLimiter: RateLimiter;
-    constructor(config: HttpRuntimeConfig, store: OAuthStore);
+    constructor(config: HttpRuntimeConfig, store: OAuthStore, linker: AccountLinker);
     handle(request: Request): Promise<Response | undefined>;
     verifyAccessToken(token: string): Promise<AuthInfo>;
     private handleRegister;
     private handleAuthorize;
     private authorizeForm;
+    private renderAuthorize;
     private authorizeSubmit;
     private authorizeErrorRedirect;
     private handleToken;
@@ -35,7 +38,5 @@ export declare class OwnerAuthorizationServer implements OAuthTokenVerifier {
     private handleRevoke;
 }
 export declare function resourcesEqual(left: string, right: string): boolean;
-export declare function createStaticBearerAuthInfo(token: string, resource: URL): AuthInfo;
-export declare function parseBearerToken(header: string | null | undefined): string | undefined;
 export { timingSafeEqualString };
 //# sourceMappingURL=oauth.d.ts.map

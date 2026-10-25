@@ -5,9 +5,8 @@ const server_1 = require("@modelcontextprotocol/server");
 const stdio_1 = require("@modelcontextprotocol/server/stdio");
 const zod_1 = require("zod");
 const auth_js_1 = require("./auth.js");
-const browser_js_1 = require("./browser.js");
+const hellofresh_api_js_1 = require("./hellofresh-api.js");
 const login_mode_js_1 = require("./login-mode.js");
-const AUTH_TOOL_NAMES = new Set(["auth_status", "login", "logout"]);
 // ─── Schemas ──────────────────────────────────────────────────────────────────
 const GetMenuSchema = zod_1.z.object({
     week_offset: zod_1.z
@@ -113,7 +112,7 @@ const RateRecipeSchema = zod_1.z.object({
 const TOOLS = [
     {
         name: "auth_status",
-        description: "Show whether a HelloFresh session file exists, whether its cookies look valid, and when it was saved. Does not return cookie values. Google SSO users should run login if valid is false.",
+        description: "Show the linked HelloFresh email and country, whether the access token is still valid, and when it was saved. Never returns tokens.",
         inputSchema: {
             type: "object",
             properties: {},
@@ -121,7 +120,7 @@ const TOOLS = [
     },
     {
         name: "login",
-        description: "Open a headed Chromium window on the HelloFresh login page so you can complete Continue with Google yourself. Requires a display. Not available in HTTP/headless mode — run `npm run login` on a machine with a screen and copy session.json (HELLOFRESH_SESSION_PATH). Never send Google passwords to this tool.",
+        description: "On a local stdio server, open a headed window so you can finish Continue with Google yourself; only apiV2Auth is saved. On the HTTP connector this does not sign you in: disconnect and reconnect, then use the authorize page. Never send a password to this tool.",
         inputSchema: {
             type: "object",
             properties: {},
@@ -129,7 +128,7 @@ const TOOLS = [
     },
     {
         name: "logout",
-        description: "Delete the saved HelloFresh session file and close the browser. Does not sign you out of Google.",
+        description: "Delete the saved HelloFresh tokens for this account only. Does not sign you out of Google.",
         inputSchema: {
             type: "object",
             properties: {},
@@ -329,7 +328,7 @@ const TOOLS = [
     },
     {
         name: "rate_recipe",
-        description: "Rate a HelloFresh recipe you've cooked on a scale of 1-5 stars, optionally including a written review.",
+        description: "Rate a HelloFresh recipe. The HelloFresh API this connector uses has no rating endpoint, so the tool returns that limitation.",
         inputSchema: {
             type: "object",
             properties: {
@@ -356,16 +355,13 @@ const TOOLS = [
 // ─── Server Setup ─────────────────────────────────────────────────────────────
 class HelloFreshMCPServer {
     server;
-    hellofresh;
+    session;
     allowInteractiveLogin;
-    constructor(hellofresh = new browser_js_1.HelloFreshBrowser(), options = {}) {
+    constructor(session, options = {}) {
         this.server = new server_1.Server({ name: "@striderlabs/mcp-hellofresh", version: "1.0.0" }, { capabilities: { tools: {} } });
-        this.hellofresh = hellofresh;
+        this.session = session;
         this.allowInteractiveLogin = options.allowInteractiveLogin ?? true;
         this.setupHandlers();
-    }
-    async ensureInitialized() {
-        await this.hellofresh.ensureReady((0, auth_js_1.readOptionalPasswordCredentials)());
     }
     setupHandlers() {
         this.server.setRequestHandler("tools/list", async () => ({
@@ -374,9 +370,6 @@ class HelloFreshMCPServer {
         this.server.setRequestHandler("tools/call", async (request) => {
             const { name, arguments: args } = request.params;
             try {
-                if (!AUTH_TOOL_NAMES.has(name)) {
-                    await this.ensureInitialized();
-                }
                 return await this.handleTool(name, args ?? {});
             }
             catch (error) {
@@ -408,73 +401,84 @@ class HelloFreshMCPServer {
         });
         switch (name) {
             case "auth_status": {
-                const status = await this.hellofresh.getAuthStatus();
+                const status = await this.session.status();
                 return text(status);
             }
             case "login": {
+                if (!this.allowInteractiveLogin || !this.session.login) {
+                    throw auth_js_1.AuthError.loginFailed(login_mode_js_1.HTTP_LOGIN_MESSAGE);
+                }
                 (0, login_mode_js_1.assertInteractiveLoginAllowed)({
-                    httpMode: !this.allowInteractiveLogin,
+                    httpMode: false,
                     hasInjectedHeadedLauncher: false,
                 });
                 void this.notifyLoginWindow();
-                const result = await this.hellofresh.interactiveLogin();
+                const result = await this.session.login();
                 return text({
                     ok: true,
-                    message: "HelloFresh session saved. Complete Google SSO is done; cookie values are not returned.",
-                    session_path: result.path,
+                    message: "HelloFresh account saved. Token values are not returned.",
+                    email: result.email,
+                    country: result.country,
                     saved_at: result.savedAt,
                 });
             }
             case "logout": {
-                await this.hellofresh.logout();
+                await this.session.logout();
                 return text({
                     ok: true,
-                    message: "HelloFresh session deleted and browser closed.",
+                    message: "HelloFresh tokens for this account were deleted.",
                 });
             }
             case "get_menu": {
                 const params = GetMenuSchema.parse(args);
-                const menu = await this.hellofresh.getMenu(params.week_offset);
+                const menu = await (await this.session.api()).getMenu(params.week_offset);
                 return text({
                     week_offset: params.week_offset,
-                    recipe_count: menu.length,
-                    recipes: menu,
+                    week_id: menu.weekId,
+                    recipe_count: menu.recipes.length,
+                    recipes: menu.recipes,
                 });
             }
             case "get_recipe_details": {
                 const params = GetRecipeDetailsSchema.parse(args);
-                const details = await this.hellofresh.getRecipeDetails(params.recipe_id);
+                const details = await (await this.session.api()).getRecipe(params.recipe_id);
                 return text(details);
             }
             case "select_meals": {
                 const params = SelectMealsSchema.parse(args);
-                const result = await this.hellofresh.selectMeals(params.week_id, params.meals.map((m) => ({ recipeId: m.recipe_id, servings: m.servings })));
+                const result = await (await this.session.api()).selectMeals(params.week_id, params.meals.map((m) => ({ recipeId: m.recipe_id, servings: m.servings })));
                 return text(result);
             }
             case "skip_week": {
                 const params = SkipWeekSchema.parse(args);
-                const result = await this.hellofresh.skipWeek(params.week_id);
+                const result = await (await this.session.api()).skipWeek(params.week_id);
                 return text(result);
             }
             case "get_delivery_schedule": {
-                const schedule = await this.hellofresh.getDeliverySchedule();
+                const schedule = await (await this.session.api()).getDeliveries();
                 return text({
                     delivery_count: schedule.length,
-                    deliveries: schedule,
+                    deliveries: schedule.map((week) => ({
+                        weekId: week.weekId,
+                        deliveryDate: week.deliveryDate ?? "",
+                        status: week.status ?? "",
+                        meals: [],
+                        canModify: (week.status ?? "").toUpperCase() !== "PAUSED",
+                    })),
                 });
             }
             case "modify_delivery": {
                 const params = ModifyDeliverySchema.parse(args);
-                const result = await this.hellofresh.modifyDelivery(params.week_id, params.new_date);
+                const result = await (await this.session.api()).modifyDelivery(params.week_id, params.new_date);
                 return text(result);
             }
             case "get_preferences": {
-                const preferences = await this.hellofresh.getPreferences();
+                const preferences = await (await this.session.api()).getPreferences();
                 return text(preferences);
             }
             case "update_preferences": {
                 const params = UpdatePreferencesSchema.parse(args);
-                const result = await this.hellofresh.updatePreferences({
+                const result = await (await this.session.api()).updatePreferences({
                     vegetarian: params.vegetarian,
                     familyFriendly: params.family_friendly,
                     dietaryPreferences: params.dietary_preferences,
@@ -484,12 +488,12 @@ class HelloFreshMCPServer {
                 return text(result);
             }
             case "get_subscription": {
-                const subscription = await this.hellofresh.getSubscription();
+                const subscription = await (await this.session.api()).getSubscription();
                 return text(subscription);
             }
             case "modify_subscription": {
                 const params = ModifySubscriptionSchema.parse(args);
-                const result = await this.hellofresh.modifySubscription({
+                const result = await (await this.session.api()).modifySubscription({
                     mealsPerWeek: params.meals_per_week,
                     servingsPerMeal: params.servings_per_meal,
                     frequency: params.frequency,
@@ -498,16 +502,15 @@ class HelloFreshMCPServer {
             }
             case "get_past_orders": {
                 const params = GetPastOrdersSchema.parse(args);
-                const orders = await this.hellofresh.getPastOrders(params.limit);
+                const orders = await (await this.session.api()).getPastOrders(params.limit);
                 return text({
                     order_count: orders.length,
                     orders,
                 });
             }
             case "rate_recipe": {
-                const params = RateRecipeSchema.parse(args);
-                const result = await this.hellofresh.rateRecipe(params.recipe_id, params.rating, params.comment);
-                return text(result);
+                RateRecipeSchema.parse(args);
+                throw new hellofresh_api_js_1.HelloFreshApiError("unsupported", hellofresh_api_js_1.RATE_RECIPE_UNSUPPORTED);
             }
             default:
                 throw new Error(`Unknown tool: ${name}`);
@@ -517,8 +520,7 @@ class HelloFreshMCPServer {
         const transport = new stdio_1.StdioServerTransport();
         await this.server.connect(transport);
         console.error("HelloFresh MCP server running on stdio");
-        const shutdown = async () => {
-            await this.hellofresh.close();
+        const shutdown = () => {
             process.exit(0);
         };
         process.on("SIGINT", shutdown);

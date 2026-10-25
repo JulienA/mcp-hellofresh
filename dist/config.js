@@ -7,7 +7,7 @@ exports.loadHttpRuntimeConfig = loadHttpRuntimeConfig;
 exports.redirectHostnameAllowed = redirectHostnameAllowed;
 const node_os_1 = require("node:os");
 const node_path_1 = require("node:path");
-const security_js_1 = require("./security.js");
+const accounts_js_1 = require("./accounts.js");
 exports.DEFAULT_REDIRECT_HOSTS = ["claude.ai", "claude.com", "chatgpt.com"];
 exports.MCP_SCOPE = "mcp";
 exports.ACCESS_TOKEN_TTL_SEC = 60 * 60;
@@ -59,21 +59,6 @@ function parseRedirectHosts(env) {
         .map((item) => item.trim().toLowerCase())
         .filter(Boolean);
 }
-function ownerPasswordDigest(env) {
-    const hashed = env.MCP_OWNER_PASSWORD_HASH?.trim();
-    if (hashed) {
-        const digest = (0, security_js_1.parseOwnerPasswordHash)(hashed);
-        if (!digest) {
-            throw new ConfigError("MCP_OWNER_PASSWORD_HASH must look like sha256:<64 hex chars>.");
-        }
-        return digest;
-    }
-    const password = env.MCP_OWNER_PASSWORD;
-    if (password && password.length > 0) {
-        return (0, security_js_1.sha256Hex)(password);
-    }
-    throw new ConfigError("HTTP mode requires MCP_OWNER_PASSWORD or MCP_OWNER_PASSWORD_HASH. This is an owner secret for the authorize page, not a Google or HelloFresh password.");
-}
 function argvValue(argv, flag) {
     const index = argv.indexOf(flag);
     if (index >= 0 && argv[index + 1]) {
@@ -84,7 +69,6 @@ function argvValue(argv, flag) {
     return matched ? matched.slice(prefix.length) : undefined;
 }
 function loadHttpRuntimeConfig(env = process.env, argv = process.argv.slice(2)) {
-    const ownerPasswordSha256Hex = ownerPasswordDigest(env);
     const host = argvValue(argv, "--host") || env.HOST || "127.0.0.1";
     const port = parsePositiveInt(argvValue(argv, "--port") || env.PORT, 8080);
     const publicBaseRaw = env.PUBLIC_BASE_URL?.trim();
@@ -112,16 +96,15 @@ function loadHttpRuntimeConfig(env = process.env, argv = process.argv.slice(2)) 
     }
     const issuer = new URL(publicBaseUrl.origin);
     const resourceUrl = new URL("/mcp", issuer);
-    const bearerToken = env.MCP_BEARER_TOKEN?.trim() || undefined;
+    const oauthStorePath = resolveOAuthStorePath(env);
     return {
         host,
         port,
         publicBaseUrl: issuer,
         issuer,
         resourceUrl,
-        ownerPasswordSha256Hex,
-        bearerToken,
-        oauthStorePath: resolveOAuthStorePath(env),
+        oauthStorePath,
+        usersDir: (0, accounts_js_1.resolveUsersDir)(oauthStorePath, env),
         redirectHosts: parseRedirectHosts(env),
         allowLoopbackRedirects: env.MCP_OAUTH_ALLOW_LOOPBACK !== "0",
         authorizeMaxAttempts: parsePositiveInt(env.MCP_AUTHORIZE_MAX_ATTEMPTS, exports.DEFAULT_AUTHORIZE_MAX_ATTEMPTS),

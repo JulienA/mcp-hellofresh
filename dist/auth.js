@@ -46,8 +46,11 @@ function toAuthError(error) {
     const cause = error instanceof Error ? error : undefined;
     return AuthError.loginFailed(message, cause);
 }
+function isHelloFreshApiError(error) {
+    return error instanceof Error && error.name === "HelloFreshApiError" && "code" in error;
+}
 function formatAuthToolError(error) {
-    if (error instanceof AuthError) {
+    if (error instanceof AuthError || isHelloFreshApiError(error)) {
         return {
             content: [
                 {

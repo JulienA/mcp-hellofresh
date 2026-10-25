@@ -6,12 +6,15 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.startHttpServer = startHttpServer;
 const node_http_1 = __importDefault(require("node:http"));
 const server_1 = require("@modelcontextprotocol/server");
-const browser_js_1 = require("./browser.js");
+const accounts_js_1 = require("./accounts.js");
+const account_linker_js_1 = require("./account-linker.js");
+const hellofresh_session_js_1 = require("./hellofresh-session.js");
 const mcp_server_js_1 = require("./mcp-server.js");
 const node_http_js_1 = require("./node-http.js");
 const oauth_js_1 = require("./oauth.js");
 const oauth_store_js_1 = require("./oauth-store.js");
-async function startHttpServer(config, hellofresh = new browser_js_1.HelloFreshBrowser()) {
+const request_context_js_1 = require("./request-context.js");
+async function startHttpServer(config, options = {}) {
     const server = node_http_1.default.createServer();
     await listen(server, config.host, config.port);
     const address = server.address();
@@ -26,9 +29,21 @@ async function startHttpServer(config, hellofresh = new browser_js_1.HelloFreshB
         issuer: new URL(origin.origin),
         resourceUrl: new URL("/mcp", origin.origin),
     };
+    const fetchImpl = options.fetchImpl ?? fetch;
+    const accounts = new accounts_js_1.AccountStore(resolved.usersDir);
+    const linker = options.linker ?? (0, account_linker_js_1.createAccountLinker)(accounts, fetchImpl);
+    const clients = new hellofresh_session_js_1.AccountClients(accounts, fetchImpl);
     const store = new oauth_store_js_1.OAuthStore(resolved.oauthStorePath);
-    const oauth = new oauth_js_1.OwnerAuthorizationServer(resolved, store);
-    const mcpHandler = (0, server_1.createMcpHandler)(() => new mcp_server_js_1.HelloFreshMCPServer(hellofresh, { allowInteractiveLogin: false }).server, { legacy: "stateless" });
+    const oauth = new oauth_js_1.OwnerAuthorizationServer(resolved, store, linker);
+    const mcpHandler = (0, server_1.createMcpHandler)((ctx) => {
+        const userId = userIdFromAuth(ctx.authInfo) ?? (0, request_context_js_1.currentHelloFreshUserId)();
+        if (!userId) {
+            throw new Error("This access token is not linked to a HelloFresh account.");
+        }
+        return new mcp_server_js_1.HelloFreshMCPServer(clients.sessionFor(userId), {
+            allowInteractiveLogin: false,
+        }).server;
+    }, { legacy: "stateless" });
     const authMetadata = {
         oauthMetadata: (0, oauth_js_1.buildAuthorizationServerMetadata)(resolved.issuer),
         resourceServerUrl: resolved.resourceUrl,
@@ -81,11 +96,18 @@ async function startHttpServer(config, hellofresh = new browser_js_1.HelloFreshB
             return oauthResponse;
         }
         if (path === "/mcp") {
-            const auth = await authenticate(request, resolved, oauthGate);
+            const auth = await oauthGate(request);
             if (auth instanceof Response) {
                 return auth;
             }
-            return mcpHandler.fetch(request, { authInfo: auth });
+            const userId = userIdFromAuth(auth);
+            if (!userId) {
+                return new Response("Unauthorized", {
+                    status: 401,
+                    headers: { "WWW-Authenticate": "Bearer" },
+                });
+            }
+            return request_context_js_1.helloFreshUserContext.run(userId, () => mcpHandler.fetch(request, { authInfo: auth }));
         }
         return new Response("Not Found", { status: 404 });
     };
@@ -115,7 +137,6 @@ async function startHttpServer(config, hellofresh = new browser_js_1.HelloFreshB
             server.close((err) => (err ? reject(err) : resolve()));
         });
         await mcpHandler.close();
-        await hellofresh.close();
     };
     return {
         server,
@@ -124,14 +145,9 @@ async function startHttpServer(config, hellofresh = new browser_js_1.HelloFreshB
         close,
     };
 }
-async function authenticate(request, config, oauthGate) {
-    if (config.bearerToken) {
-        const presented = (0, oauth_js_1.parseBearerToken)(request.headers.get("authorization"));
-        if (presented && (0, oauth_js_1.timingSafeEqualString)(presented, config.bearerToken)) {
-            return (0, oauth_js_1.createStaticBearerAuthInfo)(presented, config.resourceUrl);
-        }
-    }
-    return oauthGate(request);
+function userIdFromAuth(auth) {
+    const userId = auth?.extra?.userId;
+    return typeof userId === "string" && userId ? userId : undefined;
 }
 function extraMetadataResponse(request, options) {
     const path = stripTrailingSlash(new URL(request.url).pathname);
